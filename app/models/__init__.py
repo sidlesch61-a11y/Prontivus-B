@@ -200,6 +200,7 @@ class Patient(BaseModel):
     appointments = relationship("Appointment", back_populates="patient", cascade="all, delete-orphan")
     invoices = relationship("Invoice", back_populates="patient", cascade="all, delete-orphan")
     preauth_requests = relationship("PreAuthRequest", back_populates="patient", cascade="all, delete-orphan")
+    message_threads = relationship("MessageThread", back_populates="patient", cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<Patient(id={self.id}, name='{self.full_name}')>"
@@ -307,9 +308,13 @@ from app.models.patient_call import PatientCall
 
 # Import TISS template models
 from app.models.tiss_template import TissTemplate, TissTemplateCategory
+from app.models.system_log import SystemLog
 
 # Import user settings model
 from app.models.user_settings import UserSettings
+
+# Import message models
+from app.models.message import MessageThread, Message, MessageStatus
 
 # Export all models
 __all__ = [
@@ -366,5 +371,9 @@ __all__ = [
     "TissTemplate",
     "TissTemplateCategory",
     "UserSettings",
+    "SystemLog",
+    "MessageThread",
+    "Message",
+    "MessageStatus",
 ]
 

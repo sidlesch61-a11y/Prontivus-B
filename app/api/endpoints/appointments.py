@@ -197,6 +197,116 @@ async def get_patient_appointments(
     return appointment_list
 
 
+@router.post("/{appointment_id}/cancel", response_model=AppointmentResponse)
+async def cancel_patient_appointment(
+    appointment_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Allow a patient to cancel their own appointment.
+    """
+    if current_user.role != UserRole.PATIENT:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only patients can cancel via this endpoint")
+
+    # Map user to patient by email and clinic
+    patient_result = await db.execute(select(Patient).filter(and_(Patient.email == current_user.email, Patient.clinic_id == current_user.clinic_id)))
+    patient = patient_result.scalar_one_or_none()
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    appt_result = await db.execute(select(Appointment).filter(and_(Appointment.id == appointment_id, Appointment.patient_id == patient.id, Appointment.clinic_id == current_user.clinic_id)))
+    appt = appt_result.scalar_one_or_none()
+    if not appt:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+
+    appt.status = AppointmentStatus.CANCELLED
+    await db.commit()
+    await db.refresh(appt)
+
+    # Build response with patient and doctor names
+    doc = await db.get(User, appt.doctor_id)
+    pat = await db.get(Patient, appt.patient_id)
+    return AppointmentResponse(
+        id=appt.id,
+        patient_id=appt.patient_id,
+        doctor_id=appt.doctor_id,
+        scheduled_datetime=appt.scheduled_datetime,
+        duration_minutes=appt.duration_minutes,
+        status=appt.status,
+        appointment_type=appt.appointment_type,
+        reason=appt.reason,
+        notes=appt.notes,
+        patient_name=pat.full_name if pat else None,
+        doctor_name=f"{doc.first_name} {doc.last_name}" if doc else None,
+        created_at=appt.created_at,
+        updated_at=appt.updated_at,
+    )
+
+
+class ReschedulePayload(AppointmentUpdate):
+    pass
+
+
+@router.post("/{appointment_id}/reschedule", response_model=AppointmentResponse)
+async def reschedule_patient_appointment(
+    appointment_id: int,
+    payload: ReschedulePayload,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Allow a patient to reschedule their own appointment (date/time and optional reason/notes).
+    Checks slot availability for the same doctor.
+    """
+    if current_user.role != UserRole.PATIENT:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only patients can reschedule via this endpoint")
+
+    patient_result = await db.execute(select(Patient).filter(and_(Patient.email == current_user.email, Patient.clinic_id == current_user.clinic_id)))
+    patient = patient_result.scalar_one_or_none()
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    appt_result = await db.execute(select(Appointment).filter(and_(Appointment.id == appointment_id, Appointment.patient_id == patient.id, Appointment.clinic_id == current_user.clinic_id)))
+    appt = appt_result.scalar_one_or_none()
+    if not appt:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+
+    # Only reschedule datetime (and optional reason/notes)
+    if payload.scheduled_datetime:
+        available = await check_slot_availability(db, appt.doctor_id, payload.scheduled_datetime, current_user.clinic_id, exclude_appointment_id=appt.id, duration_minutes=payload.duration_minutes or appt.duration_minutes)
+        if not available:
+            raise HTTPException(status_code=400, detail="Selected time slot is not available")
+        appt.scheduled_datetime = payload.scheduled_datetime
+    if payload.duration_minutes:
+        appt.duration_minutes = payload.duration_minutes
+    if payload.reason is not None:
+        appt.reason = payload.reason
+    if payload.notes is not None:
+        appt.notes = payload.notes
+
+    await db.commit()
+    await db.refresh(appt)
+
+    doc = await db.get(User, appt.doctor_id)
+    pat = await db.get(Patient, appt.patient_id)
+    return AppointmentResponse(
+        id=appt.id,
+        patient_id=appt.patient_id,
+        doctor_id=appt.doctor_id,
+        scheduled_datetime=appt.scheduled_datetime,
+        duration_minutes=appt.duration_minutes,
+        status=appt.status,
+        appointment_type=appt.appointment_type,
+        reason=appt.reason,
+        notes=appt.notes,
+        patient_name=pat.full_name if pat else None,
+        doctor_name=f"{doc.first_name} {doc.last_name}" if doc else None,
+        created_at=appt.created_at,
+        updated_at=appt.updated_at,
+    )
+
+
 @router.get("/{appointment_id}", response_model=AppointmentResponse)
 async def get_appointment(
     appointment_id: int,

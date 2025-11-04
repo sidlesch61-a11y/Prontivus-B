@@ -9,13 +9,18 @@ load_dotenv()
 # Get database URL from environment variable
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@localhost:5432/clinicore"
+    "postgresql+asyncpg://prontivus_clinic_user:awysfvJWF0oFBmG7zJDCirqw238MjrmT@dpg-d441bemuk2gs739jnde0-a.oregon-postgres.render.com/prontivus_clinic"
 )
 
 # Create async engine
+# Determine if we should echo SQL queries (only in development)
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+DEBUG = os.getenv("DEBUG", "True").lower() == "true"
+ECHO_SQL = (ENVIRONMENT == "development" and DEBUG)
+
 engine = create_async_engine(
     DATABASE_URL,
-    echo=True,  # Set to False in production
+    echo=ECHO_SQL,  # Only echo SQL in development
     future=True,
     pool_pre_ping=True,
 )

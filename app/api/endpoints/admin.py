@@ -23,6 +23,10 @@ from app.core.licensing import AVAILABLE_MODULES
 from typing import Dict, Any
 from sqlalchemy.exc import SQLAlchemyError
 import asyncio
+from app.models import SystemLog
+from app.schemas.system_log import (
+    SystemLogCreate, SystemLogUpdate, SystemLogResponse,
+)
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -190,7 +194,23 @@ async def get_clinic(
             detail="Clinic not found"
         )
     
-    return clinic
+    # Ensure date-only fields for pydantic schema
+    return ClinicResponse(
+        id=clinic.id,
+        name=clinic.name,
+        legal_name=clinic.legal_name,
+        tax_id=clinic.tax_id,
+        address=clinic.address,
+        phone=clinic.phone,
+        email=clinic.email,
+        is_active=clinic.is_active,
+        license_key=clinic.license_key,
+        expiration_date=clinic.expiration_date,
+        max_users=clinic.max_users,
+        active_modules=clinic.active_modules or [],
+        created_at=clinic.created_at.date() if getattr(clinic, "created_at", None) else None,
+        updated_at=clinic.updated_at.date() if getattr(clinic, "updated_at", None) else None,
+    )
 
 
 @router.post("/clinics", response_model=ClinicResponse)
@@ -351,6 +371,91 @@ async def delete_clinic(
     await db.commit()
     
     return {"message": "Clinic deactivated successfully"}
+
+
+# ==================== System Logs ====================
+
+@router.get("/logs", response_model=List[SystemLogResponse])
+async def list_logs(
+    level: Optional[str] = Query(None),
+    source: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=1000),
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_session),
+):
+    try:
+        query = select(SystemLog)
+        if level:
+            query = query.filter(SystemLog.level == level)
+        if source:
+            query = query.filter(SystemLog.source == source)
+        if search:
+            like = f"%{search}%"
+            query = query.filter(or_(SystemLog.message.ilike(like), SystemLog.details.ilike(like)))
+        query = query.order_by(SystemLog.timestamp.desc()).limit(limit)
+        result = await db.execute(query)
+        logs = result.scalars().all()
+        return [SystemLogResponse.model_validate(l) for l in logs]
+    except SQLAlchemyError as e:
+        # If table doesn't exist yet, return empty list gracefully
+        if "relation \"system_logs\" does not exist" in str(e):
+            return []
+        raise
+
+
+@router.post("/logs", response_model=SystemLogResponse, status_code=status.HTTP_201_CREATED)
+async def create_log(
+    payload: SystemLogCreate,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_session),
+):
+    log = SystemLog(
+        level=payload.level,
+        message=payload.message,
+        source=payload.source,
+        details=payload.details,
+        user_id=payload.user_id or current_user.id,
+        clinic_id=payload.clinic_id or current_user.clinic_id,
+    )
+    db.add(log)
+    await db.commit()
+    await db.refresh(log)
+    return SystemLogResponse.model_validate(log)
+
+
+@router.put("/logs/{log_id}", response_model=SystemLogResponse)
+async def update_log(
+    log_id: int,
+    payload: SystemLogUpdate,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_session),
+):
+    result = await db.execute(select(SystemLog).where(SystemLog.id == log_id))
+    log = result.scalar_one_or_none()
+    if not log:
+        raise HTTPException(status_code=404, detail="Log not found")
+    update_data = payload.model_dump(exclude_unset=True)
+    for k, v in update_data.items():
+        setattr(log, k, v)
+    await db.commit()
+    await db.refresh(log)
+    return SystemLogResponse.model_validate(log)
+
+
+@router.delete("/logs/{log_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_log(
+    log_id: int,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_session),
+):
+    result = await db.execute(select(SystemLog).where(SystemLog.id == log_id))
+    log = result.scalar_one_or_none()
+    if not log:
+        raise HTTPException(status_code=404, detail="Log not found")
+    await db.delete(log)
+    await db.commit()
+    return {"status": "ok"}
 
 
 @router.get("/modules", response_model=List[str])

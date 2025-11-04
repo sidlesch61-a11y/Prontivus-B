@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: prontivus-backend
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+        # Use the Internal Database URL from your PostgreSQL service
+      - key: SECRET_KEY
+        generateValue: true
+        # IMPORTANT: Generate a strong secret key and set it manually
+      - key: ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "30"
+      - key: REFRESH_TOKEN_EXPIRE_DAYS
+        value: "7"
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: "false"
+      - key: BACKEND_CORS_ORIGINS
+        # Add your frontend URL(s) here, comma-separated
+        # Example: https://prontivus.vercel.app,https://www.prontivus.com
+        value: ""
+      - key: PYTHON_VERSION
+        value: 3.12.0
+

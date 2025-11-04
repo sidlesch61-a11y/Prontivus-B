@@ -2,14 +2,15 @@
 User management API endpoints
 """
 from typing import List, Optional
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, and_
 
 from app.core.auth import get_current_user, RoleChecker
 from app.models import User, UserRole
 from database import get_async_session
 from pydantic import BaseModel
+from app.core.security import hash_password
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
@@ -88,3 +89,100 @@ async def get_doctors(
         doctors_list.append(doctor_dict)
     
     return doctors_list
+
+
+class UserCreateRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+    first_name: Optional[str] = ""
+    last_name: Optional[str] = ""
+    role: UserRole
+
+
+class UserUpdateRequest(BaseModel):
+    email: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    role: Optional[UserRole] = None
+    is_active: Optional[bool] = None
+    is_verified: Optional[bool] = None
+
+
+@router.post("", response_model=UserListResponse, status_code=status.HTTP_201_CREATED)
+async def create_user(
+    payload: UserCreateRequest,
+    current_user: User = Depends(RoleChecker([UserRole.ADMIN])),
+    db: AsyncSession = Depends(get_async_session),
+):
+    # Ensure unique username/email in clinic scope
+    exists = await db.execute(select(User).where(User.username == payload.username))
+    if exists.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Username already exists")
+    exists = await db.execute(select(User).where(User.email == payload.email))
+    if exists.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Email already exists")
+
+    new_user = User(
+        username=payload.username,
+        email=payload.email,
+        hashed_password=hash_password(payload.password),
+        first_name=payload.first_name or "",
+        last_name=payload.last_name or "",
+        role=payload.role,
+        clinic_id=current_user.clinic_id,
+        is_active=True,
+        is_verified=False,
+    )
+    db.add(new_user)
+    await db.commit()
+    await db.refresh(new_user)
+    return UserListResponse.model_validate(new_user)
+
+
+@router.patch("/{user_id}", response_model=UserListResponse)
+async def update_user(
+    user_id: int,
+    payload: UserUpdateRequest,
+    current_user: User = Depends(RoleChecker([UserRole.ADMIN])),
+    db: AsyncSession = Depends(get_async_session),
+):
+    query = select(User).where(and_(User.id == user_id, User.clinic_id == current_user.clinic_id))
+    result = await db.execute(query)
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if payload.email is not None:
+        user.email = payload.email
+    if payload.first_name is not None:
+        user.first_name = payload.first_name
+    if payload.last_name is not None:
+        user.last_name = payload.last_name
+    if payload.role is not None:
+        user.role = payload.role
+    if payload.is_active is not None:
+        user.is_active = payload.is_active
+    if payload.is_verified is not None:
+        user.is_verified = payload.is_verified
+
+    await db.commit()
+    await db.refresh(user)
+    return UserListResponse.model_validate(user)
+
+
+@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_user(
+    user_id: int,
+    current_user: User = Depends(RoleChecker([UserRole.ADMIN])),
+    db: AsyncSession = Depends(get_async_session),
+):
+    query = select(User).where(and_(User.id == user_id, User.clinic_id == current_user.clinic_id))
+    result = await db.execute(query)
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.is_active = False
+    await db.commit()
+    return {"status": "ok"}

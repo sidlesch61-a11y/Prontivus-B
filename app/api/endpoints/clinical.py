@@ -303,6 +303,63 @@ async def get_patient_clinical_history(
     return history
 
 
+@router.get(
+    "/clinical/me/history",
+    response_model=List[PatientClinicalHistoryResponse]
+)
+async def get_my_clinical_history(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Patient self-access to their clinical history (appointments + clinical records with prescriptions and exam requests).
+    Maps the authenticated user to a Patient by email and clinic.
+    """
+    if current_user.role != UserRole.PATIENT:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only patients can access their own clinical history")
+
+    # Map user to patient by email
+    pat_q = select(Patient).where(Patient.email == current_user.email, Patient.clinic_id == current_user.clinic_id)
+    pat_res = await db.execute(pat_q)
+    patient = pat_res.scalar_one_or_none()
+    if not patient:
+        return []
+
+    appts_q = select(Appointment, User, ClinicalRecord).join(
+        User, Appointment.doctor_id == User.id
+    ).outerjoin(
+        ClinicalRecord, Appointment.id == ClinicalRecord.appointment_id
+    ).where(
+        Appointment.patient_id == patient.id,
+        Appointment.clinic_id == current_user.clinic_id
+    ).order_by(Appointment.scheduled_datetime.desc())
+
+    appts_res = await db.execute(appts_q)
+    appts = appts_res.all()
+
+    out: list[PatientClinicalHistoryResponse] = []
+    for appointment, doctor, clinical_record in appts:
+        record_detail = None
+        if clinical_record:
+            rq = select(ClinicalRecord).options(
+                joinedload(ClinicalRecord.prescriptions),
+                joinedload(ClinicalRecord.exam_requests),
+                joinedload(ClinicalRecord.diagnoses)
+            ).where(ClinicalRecord.id == clinical_record.id)
+            rr = await db.execute(rq)
+            record_detail = rr.scalar_one()
+
+        out.append(PatientClinicalHistoryResponse(
+            appointment_id=appointment.id,
+            appointment_date=appointment.scheduled_datetime,
+            doctor_name=f"{doctor.first_name} {doctor.last_name}",
+            appointment_type=appointment.appointment_type,
+            clinical_record=ClinicalRecordDetailResponse.model_validate(record_detail) if record_detail else None
+        ))
+
+    return out
+
+
 # ==================== Prescriptions ====================
 
 @router.post(

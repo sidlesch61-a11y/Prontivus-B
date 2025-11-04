@@ -42,7 +42,11 @@ async def create_procedure(
     await db.commit()
     await db.refresh(db_procedure)
     
-    return db_procedure
+    # Return with empty products list
+    procedure_response = ProcedureResponse.model_validate(db_procedure)
+    procedure_response.procedure_products = []
+    
+    return procedure_response
 
 @router.get("/procedures", response_model=List[ProcedureResponse])
 async def get_procedures(
@@ -164,9 +168,32 @@ async def update_procedure(
         setattr(procedure, field, value)
     
     await db.commit()
-    await db.refresh(procedure)
     
-    return procedure
+    # Reload with products for response
+    procedure_query = select(Procedure).filter(
+        Procedure.id == procedure_id,
+        Procedure.clinic_id == current_user.clinic_id
+    ).options(
+        selectinload(Procedure.procedure_products).selectinload(ProcedureProduct.product)
+    )
+    procedure_result = await db.execute(procedure_query)
+    procedure = procedure_result.unique().scalar_one()
+    
+    procedure_response = ProcedureResponse.model_validate(procedure)
+    procedure_response.procedure_products = [
+        ProcedureProductResponse(
+            id=pp.id,
+            procedure_id=pp.procedure_id,
+            product_id=pp.product_id,
+            quantity_required=float(pp.quantity_required),
+            notes=pp.notes,
+            created_at=pp.created_at,
+            product_name=pp.product.name if pp.product else None,
+            product_unit_of_measure=pp.product.unit_of_measure if pp.product else None
+        ) for pp in procedure.procedure_products
+    ]
+    
+    return procedure_response
 
 @router.delete("/procedures/{procedure_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_procedure(
@@ -198,7 +225,7 @@ async def delete_procedure(
     procedure.is_active = False  # Soft delete
     await db.commit()
     
-    return {"message": "Procedure deleted successfully"}
+    return None  # 204 No Content
 
 # ==================== Procedure Products ====================
 

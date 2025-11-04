@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload, joinedload
 
 from app.core.auth import get_current_user, require_staff, require_admin
+from app.models import UserRole
 from database import get_async_session
 from app.models import (
     User, ServiceItem, Invoice, InvoiceLine, Patient, Appointment,
@@ -205,6 +206,112 @@ async def get_invoice(
             line.procedure_name = line.procedure.name
     
     return invoice
+
+
+@router.get("/invoices/me", response_model=List[InvoiceResponse])
+async def get_my_invoices(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+    status: Optional[InvoiceStatus] = Query(None, description="Filter by status"),
+):
+    """
+    Get the current patient's invoices
+    Patients can only see their own invoices
+    """
+    # Find patient by email
+    patient_query = select(Patient).filter(
+        and_(
+            Patient.email == current_user.email,
+            Patient.clinic_id == current_user.clinic_id
+        )
+    )
+    patient_result = await db.execute(patient_query)
+    patient = patient_result.scalar_one_or_none()
+    
+    if not patient:
+        return []
+    
+    # Get invoices for this patient
+    query = select(Invoice).options(
+        joinedload(Invoice.patient),
+        joinedload(Invoice.appointment),
+        selectinload(Invoice.invoice_lines).joinedload(InvoiceLine.service_item),
+        selectinload(Invoice.invoice_lines).joinedload(InvoiceLine.procedure),
+        selectinload(Invoice.payments)
+    ).filter(
+        and_(
+            Invoice.patient_id == patient.id,
+            Invoice.clinic_id == current_user.clinic_id
+        )
+    )
+    
+    if status:
+        query = query.filter(Invoice.status == status)
+    
+    result = await db.execute(query.order_by(Invoice.issue_date.desc()))
+    invoices = result.unique().scalars().all()
+    
+    # Return empty list if no invoices found
+    if not invoices:
+        return []
+    
+    # Convert to response models with computed fields
+    invoice_responses = []
+    for invoice in invoices:
+        try:
+            # Build patient name
+            patient_name = None
+            if invoice.patient:
+                patient_name = f"{invoice.patient.first_name or ''} {invoice.patient.last_name or ''}".strip()
+            
+            # Build appointment date
+            appointment_date = None
+            if invoice.appointment:
+                appointment_date = invoice.appointment.scheduled_datetime
+            
+            # Build invoice lines using model_validate
+            invoice_lines_list = None
+            if hasattr(invoice, 'invoice_lines') and invoice.invoice_lines:
+                invoice_lines_list = []
+                for line in invoice.invoice_lines:
+                    try:
+                        # Use model_validate for the line
+                        line_data = InvoiceLineResponse.model_validate(line, from_attributes=True).model_dump()
+                        # Add procedure_name if available
+                        if line.procedure:
+                            line_data["procedure_name"] = line.procedure.name
+                        invoice_lines_list.append(line_data)
+                    except Exception:
+                        # Skip problematic lines
+                        continue
+            
+            # Build base invoice dict from model
+            invoice_dict = {
+                "id": invoice.id,
+                "patient_id": invoice.patient_id,
+                "appointment_id": invoice.appointment_id,
+                "due_date": invoice.due_date,
+                "notes": invoice.notes,
+                "issue_date": invoice.issue_date,
+                "status": invoice.status,
+                "total_amount": invoice.total_amount,
+                "created_at": invoice.created_at,
+                "updated_at": invoice.updated_at,
+                "patient_name": patient_name,
+                "appointment_date": appointment_date,
+                "invoice_lines": invoice_lines_list,
+            }
+            
+            # Validate and create response
+            invoice_responses.append(InvoiceResponse.model_validate(invoice_dict))
+        except Exception as e:
+            # Log error but continue processing other invoices
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error processing invoice {invoice.id}: {str(e)}", exc_info=True, stack_info=True)
+            continue
+    
+    return invoice_responses
 
 
 @router.post("/invoices", response_model=InvoiceDetailResponse, status_code=status.HTTP_201_CREATED)

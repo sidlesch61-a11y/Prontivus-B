@@ -5,14 +5,29 @@ from fastapi.exceptions import RequestValidationError
 from contextlib import asynccontextmanager
 import uvicorn
 import traceback
+import os
 
 # Import API routers
-from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, notifications, user_settings, tiss_config
+from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, notifications, user_settings, tiss_config, messages
 from app.api.endpoints import icd10
 
 # Import security middleware
 from app.core.middleware import SecurityMiddleware, AuthenticationMiddleware, SecurityHeadersMiddleware, LoginAttemptMiddleware
 from app.middleware.licensing import licensing_middleware
+
+# Get CORS origins from environment variable
+def get_cors_origins():
+    """Get CORS origins from environment variable or use defaults"""
+    cors_env = os.getenv("BACKEND_CORS_ORIGINS", "")
+    if cors_env:
+        # Split by comma and strip whitespace
+        origins = [origin.strip() for origin in cors_env.split(",")]
+        return origins
+    # Default origins for development
+    return [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -32,13 +47,11 @@ app = FastAPI(
     lifespan=lifespan
 )
 # Configure CORS FIRST so headers are present even on errors
+cors_origins = get_cors_origins()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
+    allow_origins=cors_origins,
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+" if os.getenv("ENVIRONMENT") == "development" else None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -59,9 +72,19 @@ app.middleware("http")(licensing_middleware)
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Handle HTTPException with CORS headers"""
     origin = request.headers.get("origin")
-    allowed_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    allowed_origins = get_cors_origins()
     
-    if origin and (origin in allowed_origins or origin.startswith("http://localhost:") or origin.startswith("http://127.0.0.1:")):
+    # Check if origin is allowed
+    is_allowed = False
+    if origin:
+        if origin in allowed_origins:
+            is_allowed = True
+        elif os.getenv("ENVIRONMENT") == "development":
+            # In development, allow localhost origins
+            if origin.startswith("http://localhost:") or origin.startswith("http://127.0.0.1:"):
+                is_allowed = True
+    
+    if is_allowed:
         headers = {
             "Access-Control-Allow-Origin": origin,
             "Access-Control-Allow-Credentials": "true",
@@ -85,10 +108,19 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 async def global_exception_handler(request: Request, exc: Exception):
     """Global exception handler that ensures CORS headers are present on all error responses"""
     origin = request.headers.get("origin")
-    allowed_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    allowed_origins = get_cors_origins()
     
-    # Check if origin matches allowed patterns
-    if origin and (origin in allowed_origins or origin.startswith("http://localhost:") or origin.startswith("http://127.0.0.1:")):
+    # Check if origin is allowed
+    is_allowed = False
+    if origin:
+        if origin in allowed_origins:
+            is_allowed = True
+        elif os.getenv("ENVIRONMENT") == "development":
+            # In development, allow localhost origins
+            if origin.startswith("http://localhost:") or origin.startswith("http://127.0.0.1:"):
+                is_allowed = True
+    
+    if is_allowed:
         headers = {
             "Access-Control-Allow-Origin": origin,
             "Access-Control-Allow-Credentials": "true",
@@ -106,7 +138,6 @@ async def global_exception_handler(request: Request, exc: Exception):
         error_detail = exc.msg
     
     # In development, include traceback
-    import os
     if os.getenv("ENVIRONMENT", "development") == "development":
         traceback_str = traceback.format_exc()
         return JSONResponse(
@@ -129,9 +160,19 @@ async def global_exception_handler(request: Request, exc: Exception):
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """Handle validation errors with CORS headers"""
     origin = request.headers.get("origin")
-    allowed_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    allowed_origins = get_cors_origins()
     
-    if origin and (origin in allowed_origins or origin.startswith("http://localhost:") or origin.startswith("http://127.0.0.1:")):
+    # Check if origin is allowed
+    is_allowed = False
+    if origin:
+        if origin in allowed_origins:
+            is_allowed = True
+        elif os.getenv("ENVIRONMENT") == "development":
+            # In development, allow localhost origins
+            if origin.startswith("http://localhost:") or origin.startswith("http://127.0.0.1:"):
+                is_allowed = True
+    
+    if is_allowed:
         headers = {
             "Access-Control-Allow-Origin": origin,
             "Access-Control-Allow-Credentials": "true",
@@ -173,6 +214,7 @@ app.include_router(websocket_calling.router)
 app.include_router(notifications.router, prefix="/api")
 app.include_router(tiss_config.router, prefix="/api/financial")
 app.include_router(user_settings.router, prefix="/api")
+app.include_router(messages.router, prefix="/api")
 
 @app.get("/")
 async def root():
