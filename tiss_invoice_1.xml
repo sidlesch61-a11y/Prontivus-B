@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<tiss xmlns="http://www.ans.gov.br/padroes/tiss/schemas" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ans.gov.br/padroes/tiss/schemas http://www.ans.gov.br/padroes/tiss/schemas/tissV3_03_00.xsd">
+  <versao>3.03.00</versao>
+  <lote>
+    <numeroLote>LOTE000001</numeroLote>
+    <dataEnvio>2025-10-27</dataEnvio>
+    <guias>
+      <guia>
+        <identificacao>
+          <prestador>
+            <cnpj>12345678000190</cnpj>
+            <nome>HealthCare Plus</nome>
+            <codigoPrestador>001</codigoPrestador>
+          </prestador>
+          <operadora>
+            <cnpj>00000000000000</cnpj>
+            <nome>Operadora Padrão</nome>
+            <registroANS>000000</registroANS>
+          </operadora>
+          <beneficiario>
+            <numeroCarteira>15443234234</numeroCarteira>
+            <nome>Miguel Santos Oliveira</nome>
+            <cpf>15443234234</cpf>
+            <dataNascimento>1985-03-17</dataNascimento>
+            <sexo>M</sexo>
+            <nomePlano>Plano Padrão</nomePlano>
+          </beneficiario>
+          <contratado>
+            <cpf>00000000000</cpf>
+            <nome>Profissional Padrão</nome>
+            <cbo>2251</cbo>
+          </contratado>
+          <dataEmissao>2025-10-26</dataEmissao>
+          <numeroGuia>GUIA000001</numeroGuia>
+        </identificacao>
+        <procedimentos>
+          <procedimento>
+            <codigoTabela>99</codigoTabela>
+            <codigoProcedimento>10101012</codigoProcedimento>
+            <descricaoProcedimento>Consulta MÃ©dica</descricaoProcedimento>
+            <quantidadeExecutada>1</quantidadeExecutada>
+            <valorUnitario>150.00</valorUnitario>
+            <valorTotal>150.00</valorTotal>
+            <dataExecucao>2025-10-26</dataExecucao>
+            <horaInicio>08:00</horaInicio>
+            <horaFim>09:00</horaFim>
+          </procedimento>
+          <procedimento>
+            <codigoTabela>99</codigoTabela>
+            <codigoProcedimento>20101010</codigoProcedimento>
+            <descricaoProcedimento>Eletrocardiograma (ECG)</descricaoProcedimento>
+            <quantidadeExecutada>1</quantidadeExecutada>
+            <valorUnitario>80.00</valorUnitario>
+            <valorTotal>80.00</valorTotal>
+            <dataExecucao>2025-10-26</dataExecucao>
+            <horaInicio>08:00</horaInicio>
+            <horaFim>09:00</horaFim>
+          </procedimento>
+        </procedimentos>
+        <valorTotalGuia>230.00</valorTotalGuia>
+      </guia>
+    </guias>
+  </lote>
+</tiss>
