@@ -1,0 +1,22 @@
+# Backend-specific ignores
+
+.git
+.gitignore
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+venv
+
+# Local env
+.env*
+*.log
+
+# Alembic cache/build artifacts (keep versions scripts)
+alembic/*.pyc
+alembic/__pycache__/**
+
+# Data dumps and local-only files
+dump.prontivus.custom
+
