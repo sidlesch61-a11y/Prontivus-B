@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 import traceback
 import logging
+import re
 
 from fastapi import APIRouter, Depends, Query, Response, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -989,5 +990,165 @@ async def export_custom_excel(
     headers = {"Content-Disposition": f"attachment; filename=custom_report.xlsx"}
     return Response(content=xls, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
 
+
+@router.get("/vital-signs")
+async def get_vital_signs_trend(
+    period: str = Query("last_7_days", description="Time period: last_7_days, last_30_days, last_3_months, last_year, last_month"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Extract and aggregate vital signs from clinical records.
+    Parses vital signs from the objective field of clinical records.
+    Returns average vital signs grouped by day for the specified period.
+    """
+    try:
+        start_dt, end_dt = _period_to_dates(period)
+        
+        # Get clinical records with appointments in the period
+        records_stmt = (
+            select(ClinicalRecord, Appointment.scheduled_datetime)
+            .join(Appointment, ClinicalRecord.appointment_id == Appointment.id)
+            .where(
+                and_(
+                    Appointment.clinic_id == current_user.clinic_id,
+                    Appointment.scheduled_datetime >= start_dt,
+                    Appointment.scheduled_datetime <= end_dt,
+                    ClinicalRecord.objective.isnot(None),
+                    ClinicalRecord.objective != "",
+                )
+            )
+            .order_by(Appointment.scheduled_datetime)
+        )
+        records_result = await db.execute(records_stmt)
+        records_data = records_result.all()
+        
+        # Helper function to extract vital signs from text
+        def extract_vitals(text: str) -> dict:
+            """Extract vital signs from clinical record objective text"""
+            vitals = {
+                "systolic_bp": None,
+                "diastolic_bp": None,
+                "heart_rate": None,
+                "temperature": None,
+                "respiratory_rate": None,
+            }
+            
+            if not text:
+                return vitals
+            
+            text_lower = text.lower()
+            
+            # Blood Pressure patterns: PA 120/80, BP 120/80, Pressão 120/80, 120x80
+            bp_patterns = [
+                r'(?:pa|bp|press[ãa]o|press[ãa]o arterial)\s*:?\s*(\d+)\s*[/x]\s*(\d+)',
+                r'(\d+)\s*[/x]\s*(\d+)\s*(?:mmhg|mm\s*hg)',
+            ]
+            for pattern in bp_patterns:
+                match = re.search(pattern, text_lower, re.IGNORECASE)
+                if match:
+                    vitals["systolic_bp"] = int(match.group(1))
+                    vitals["diastolic_bp"] = int(match.group(2))
+                    break
+            
+            # Heart Rate patterns: FC 72, Frequência cardíaca 72, HR 72, Pulso 72
+            hr_patterns = [
+                r'(?:fc|hr|frequ[êe]ncia card[íi]aca|pulso)\s*:?\s*(\d+)',
+                r'(\d+)\s*(?:bpm|batimentos)',
+            ]
+            for pattern in hr_patterns:
+                match = re.search(pattern, text_lower, re.IGNORECASE)
+                if match:
+                    hr = int(match.group(1))
+                    if 40 <= hr <= 200:  # Reasonable range
+                        vitals["heart_rate"] = hr
+                        break
+            
+            # Temperature patterns: Temp 36.5, Temperatura 36.5, 36.5°C
+            temp_patterns = [
+                r'(?:temp|temperatura)\s*:?\s*(\d+[.,]\d+)',
+                r'(\d+[.,]\d+)\s*[°c]',
+            ]
+            for pattern in temp_patterns:
+                match = re.search(pattern, text_lower, re.IGNORECASE)
+                if match:
+                    temp_str = match.group(1).replace(',', '.')
+                    temp = float(temp_str)
+                    if 35.0 <= temp <= 42.0:  # Reasonable range
+                        vitals["temperature"] = temp
+                        break
+            
+            # Respiratory Rate patterns: FR 18, Frequência respiratória 18
+            rr_patterns = [
+                r'(?:fr|frequ[êe]ncia respirat[óo]ria)\s*:?\s*(\d+)',
+            ]
+            for pattern in rr_patterns:
+                match = re.search(pattern, text_lower, re.IGNORECASE)
+                if match:
+                    rr = int(match.group(1))
+                    if 10 <= rr <= 40:  # Reasonable range
+                        vitals["respiratory_rate"] = rr
+                        break
+            
+            return vitals
+        
+        # Group by day and aggregate
+        daily_vitals: dict = {}
+        
+        for record, scheduled_dt in records_data:
+            if not record.objective:
+                continue
+            
+            # Extract date (day only)
+            date_key = scheduled_dt.date().isoformat()
+            
+            if date_key not in daily_vitals:
+                daily_vitals[date_key] = {
+                    "systolic_bp": [],
+                    "diastolic_bp": [],
+                    "heart_rate": [],
+                    "temperature": [],
+                    "respiratory_rate": [],
+                }
+            
+            vitals = extract_vitals(record.objective)
+            
+            if vitals["systolic_bp"] is not None:
+                daily_vitals[date_key]["systolic_bp"].append(vitals["systolic_bp"])
+            if vitals["diastolic_bp"] is not None:
+                daily_vitals[date_key]["diastolic_bp"].append(vitals["diastolic_bp"])
+            if vitals["heart_rate"] is not None:
+                daily_vitals[date_key]["heart_rate"].append(vitals["heart_rate"])
+            if vitals["temperature"] is not None:
+                daily_vitals[date_key]["temperature"].append(vitals["temperature"])
+            if vitals["respiratory_rate"] is not None:
+                daily_vitals[date_key]["respiratory_rate"].append(vitals["respiratory_rate"])
+        
+        # Calculate averages per day
+        result = []
+        for date_key in sorted(daily_vitals.keys()):
+            day_data = daily_vitals[date_key]
+            result.append({
+                "date": date_key,
+                "systolic_bp": round(sum(day_data["systolic_bp"]) / len(day_data["systolic_bp"]), 1) if day_data["systolic_bp"] else None,
+                "diastolic_bp": round(sum(day_data["diastolic_bp"]) / len(day_data["diastolic_bp"]), 1) if day_data["diastolic_bp"] else None,
+                "heart_rate": round(sum(day_data["heart_rate"]) / len(day_data["heart_rate"]), 1) if day_data["heart_rate"] else None,
+                "temperature": round(sum(day_data["temperature"]) / len(day_data["temperature"]), 2) if day_data["temperature"] else None,
+                "respiratory_rate": round(sum(day_data["respiratory_rate"]) / len(day_data["respiratory_rate"]), 1) if day_data["respiratory_rate"] else None,
+            })
+        
+        return {
+            "period": period,
+            "start_date": start_dt.isoformat(),
+            "end_date": end_dt.isoformat(),
+            "daily_vitals": result,
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching vital signs: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error fetching vital signs: {str(e)}"
+        )
 
  
