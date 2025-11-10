@@ -195,50 +195,6 @@ async def get_invoices(
     return invoices
 
 
-@router.get("/invoices/{invoice_id}", response_model=InvoiceDetailResponse)
-async def get_invoice(
-    invoice_id: int,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_async_session),
-):
-    """
-    Get detailed invoice information
-    """
-    query = select(Invoice).options(
-        joinedload(Invoice.patient),
-        joinedload(Invoice.appointment).joinedload(Appointment.doctor),
-        joinedload(Invoice.invoice_lines).joinedload(InvoiceLine.service_item),
-        joinedload(Invoice.invoice_lines).joinedload(InvoiceLine.procedure)
-    ).filter(
-        and_(
-            Invoice.id == invoice_id,
-            Invoice.clinic_id == current_user.clinic_id
-        )
-    )
-    
-    result = await db.execute(query)
-    invoice = result.unique().scalar_one_or_none()
-    
-    if not invoice:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Invoice not found"
-        )
-    
-    # Add computed fields
-    invoice.patient_name = invoice.patient.full_name
-    if invoice.appointment:
-        invoice.appointment_date = invoice.appointment.scheduled_datetime
-        invoice.doctor_name = invoice.appointment.doctor.full_name
-    
-    # Add procedure names to invoice lines
-    for line in invoice.invoice_lines:
-        if line.procedure:
-            line.procedure_name = line.procedure.name
-    
-    return invoice
-
-
 @router.get("/invoices/me", response_model=List[InvoiceResponse])
 async def get_my_invoices(
     current_user: User = Depends(get_current_user),
@@ -343,6 +299,50 @@ async def get_my_invoices(
             continue
     
     return invoice_responses
+
+
+@router.get("/invoices/{invoice_id}", response_model=InvoiceDetailResponse)
+async def get_invoice(
+    invoice_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get detailed invoice information
+    """
+    query = select(Invoice).options(
+        joinedload(Invoice.patient),
+        joinedload(Invoice.appointment).joinedload(Appointment.doctor),
+        joinedload(Invoice.invoice_lines).joinedload(InvoiceLine.service_item),
+        joinedload(Invoice.invoice_lines).joinedload(InvoiceLine.procedure)
+    ).filter(
+        and_(
+            Invoice.id == invoice_id,
+            Invoice.clinic_id == current_user.clinic_id
+        )
+    )
+    
+    result = await db.execute(query)
+    invoice = result.unique().scalar_one_or_none()
+    
+    if not invoice:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Invoice not found"
+        )
+    
+    # Add computed fields
+    invoice.patient_name = invoice.patient.full_name
+    if invoice.appointment:
+        invoice.appointment_date = invoice.appointment.scheduled_datetime
+        invoice.doctor_name = invoice.appointment.doctor.full_name
+    
+    # Add procedure names to invoice lines
+    for line in invoice.invoice_lines:
+        if line.procedure:
+            line.procedure_name = line.procedure.name
+    
+    return invoice
 
 
 @router.post("/invoices", response_model=InvoiceDetailResponse, status_code=status.HTTP_201_CREATED)
