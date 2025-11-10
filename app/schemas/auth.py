@@ -26,12 +26,17 @@ class LoginRequest(BaseModel):
         min_length=6,
         max_length=100
     )
+    expected_role: Optional[str] = Field(
+        None,
+        description="Expected user role for role-based login verification (patient or staff)"
+    )
     
     class Config:
         json_schema_extra = {
             "example": {
                 "username_or_email": "admin@clinic.com",
-                "password": "secretpassword"
+                "password": "secretpassword",
+                "expected_role": "staff"
             }
         }
 

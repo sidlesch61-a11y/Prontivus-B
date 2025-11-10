@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     VAPID_PRIVATE_KEY: Optional[str] = os.getenv("VAPID_PRIVATE_KEY", None)
     VAPID_EMAIL: str = os.getenv("VAPID_EMAIL", "mailto:noreply@prontivus.com")
     
+    # Google OAuth Settings (optional)
+    GOOGLE_CLIENT_ID: Optional[str] = os.getenv("GOOGLE_CLIENT_ID", None)
+    GOOGLE_CLIENT_SECRET: Optional[str] = os.getenv("GOOGLE_CLIENT_SECRET", None)
+    GOOGLE_REDIRECT_URI: str = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:3000/auth/google/callback")
+    
     # SMS Settings (optional)
     SMS_PROVIDER: str = os.getenv("SMS_PROVIDER", "twilio")
     SMS_TWILIO_ACCOUNT_SID: Optional[str] = os.getenv("SMS_TWILIO_ACCOUNT_SID", None)
