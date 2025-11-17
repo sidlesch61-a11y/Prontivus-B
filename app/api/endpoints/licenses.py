@@ -261,6 +261,99 @@ async def list_licenses(
     return licenses_list
 
 
+@router.get("/me")
+async def get_my_license(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get the current clinic's license information
+    Returns license details for the authenticated user's clinic
+    """
+    if not current_user.clinic_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User is not associated with a clinic"
+        )
+    
+    # Fetch clinic
+    clinic_q = await db.execute(select(Clinic).where(Clinic.id == current_user.clinic_id))
+    clinic = clinic_q.scalar_one_or_none()
+    
+    if not clinic:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Clinic not found"
+        )
+    
+    # Try to get new license system (via license_id)
+    license_obj = None
+    if clinic.license_id:
+        license_q = await db.execute(select(License).where(License.id == clinic.license_id))
+        license_obj = license_q.scalar_one_or_none()
+    
+    # Build response with both new and legacy license info
+    response = {
+        "has_license": license_obj is not None or clinic.license_key is not None,
+        "license_type": None,
+        "status": None,
+        "expiration_date": None,
+        "max_users": clinic.max_users or 0,
+        "license_key": clinic.license_key or None,
+    }
+    
+    if license_obj:
+        # New license system
+        response.update({
+            "license_id": str(license_obj.id),
+            "license_type": license_obj.plan,
+            "status": license_obj.status.value,
+            "expiration_date": license_obj.end_at.isoformat() if license_obj.end_at else None,
+            "max_users": license_obj.users_limit,
+            "start_date": license_obj.start_at.isoformat() if license_obj.start_at else None,
+            "activation_key": str(license_obj.activation_key) if license_obj.activation_key else None,
+            "is_active": license_obj.is_active,
+            "days_until_expiry": license_obj.days_until_expiry,
+            "modules": license_obj.modules or [],
+        })
+    elif clinic.license_key:
+        # Legacy license system
+        response.update({
+            "license_type": "Legacy",
+            "status": "active" if (clinic.expiration_date and clinic.expiration_date >= datetime.now(timezone.utc).date()) else "expired",
+            "expiration_date": clinic.expiration_date.isoformat() if clinic.expiration_date else None,
+            "license_key": clinic.license_key,
+        })
+    else:
+        # No license
+        response.update({
+            "status": "none",
+            "license_type": "Nenhuma",
+        })
+    
+    return response
+
+
+@router.get("/entitlements")
+async def get_entitlements(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    # Fetch clinic
+    clinic_q = await db.execute(select(Clinic).where(Clinic.id == current_user.clinic_id))
+    clinic = clinic_q.scalar_one_or_none()
+    if not clinic or not clinic.license_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No license for current tenant")
+
+    ent_q = await db.execute(select(Entitlement).where(Entitlement.license_id == clinic.license_id))
+    ents: List[Entitlement] = ent_q.scalars().all()
+    return [
+        {
+            "module": e.module,
+            "enabled": e.enabled,
+            "limits": e.limits_json or {},
+        }
+        for e in ents
+    ]
+
+
 @router.get("/{license_id}", response_model=LicenseResponse)
 async def get_license(
     license_id: uuid.UUID,
@@ -344,97 +437,5 @@ async def delete_license(
     await db.commit()
     
     return {"message": "License cancelled successfully"}
-
-
-@router.get("/me")
-async def get_my_license(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Get the current clinic's license information
-    Returns license details for the authenticated user's clinic
-    """
-    if not current_user.clinic_id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User is not associated with a clinic"
-        )
-    
-    # Fetch clinic
-    clinic_q = await db.execute(select(Clinic).where(Clinic.id == current_user.clinic_id))
-    clinic = clinic_q.scalar_one_or_none()
-    
-    if not clinic:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Clinic not found"
-        )
-    
-    # Try to get new license system (via license_id)
-    license_obj = None
-    if clinic.license_id:
-        license_q = await db.execute(select(License).where(License.id == clinic.license_id))
-        license_obj = license_q.scalar_one_or_none()
-    
-    # Build response with both new and legacy license info
-    response = {
-        "has_license": license_obj is not None or clinic.license_key is not None,
-        "license_type": None,
-        "status": None,
-        "expiration_date": None,
-        "max_users": clinic.max_users or 0,
-        "license_key": clinic.license_key or None,
-    }
-    
-    if license_obj:
-        # New license system
-        response.update({
-            "license_type": license_obj.plan,
-            "status": license_obj.status.value,
-            "expiration_date": license_obj.end_at.isoformat() if license_obj.end_at else None,
-            "max_users": license_obj.users_limit,
-            "start_date": license_obj.start_at.isoformat() if license_obj.start_at else None,
-            "activation_key": str(license_obj.activation_key) if license_obj.activation_key else None,
-            "is_active": license_obj.is_active,
-            "days_until_expiry": license_obj.days_until_expiry,
-            "modules": license_obj.modules or [],
-        })
-    elif clinic.license_key:
-        # Legacy license system
-        response.update({
-            "license_type": "Legacy",
-            "status": "active" if (clinic.expiration_date and clinic.expiration_date >= datetime.now(timezone.utc).date()) else "expired",
-            "expiration_date": clinic.expiration_date.isoformat() if clinic.expiration_date else None,
-            "license_key": clinic.license_key,
-        })
-    else:
-        # No license
-        response.update({
-            "status": "none",
-            "license_type": "Nenhuma",
-        })
-    
-    return response
-
-
-@router.get("/entitlements")
-async def get_entitlements(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    # Fetch clinic
-    clinic_q = await db.execute(select(Clinic).where(Clinic.id == current_user.clinic_id))
-    clinic = clinic_q.scalar_one_or_none()
-    if not clinic or not clinic.license_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No license for current tenant")
-
-    ent_q = await db.execute(select(Entitlement).where(Entitlement.license_id == clinic.license_id))
-    ents: List[Entitlement] = ent_q.scalars().all()
-    return [
-        {
-            "module": e.module,
-            "enabled": e.enabled,
-            "limits": e.limits_json or {},
-        }
-        for e in ents
-    ]
 
 

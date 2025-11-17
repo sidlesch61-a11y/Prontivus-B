@@ -13,6 +13,7 @@ from app.core.auth import get_current_user, RoleChecker
 from app.models import User, Patient, Appointment, AppointmentStatus, UserRole
 from app.models.financial import ServiceItem, PaymentMethod, Payment, Invoice
 from app.models import Product
+from app.models.task import Task, TaskPriority
 from database import get_async_session
 from pydantic import BaseModel
 
@@ -73,6 +74,41 @@ class RegistrationStatsResponse(BaseModel):
     total_registrations: int
     active_registrations: int
     today_updates: int
+
+
+class TaskResponse(BaseModel):
+    """Task response model"""
+    id: int
+    title: str
+    description: Optional[str] = None
+    priority: str
+    completed: bool
+    completed_at: Optional[datetime] = None
+    due_date: Optional[datetime] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat() if v else None
+        }
+
+
+class TaskCreate(BaseModel):
+    """Task creation model"""
+    title: str
+    description: Optional[str] = None
+    priority: str = "Média"
+    due_date: Optional[datetime] = None
+
+
+class TaskUpdate(BaseModel):
+    """Task update model"""
+    title: Optional[str] = None
+    description: Optional[str] = None
+    priority: Optional[str] = None
+    completed: Optional[bool] = None
+    due_date: Optional[datetime] = None
 
 
 # ==================== Dashboard Endpoint ====================
@@ -165,12 +201,22 @@ async def get_secretary_dashboard(
         patients_result = await db.execute(patients_query)
         total_patients = patients_result.scalar() or 0
         
+        # ==================== Get Pending Tasks Count ====================
+        pending_tasks_query = select(func.count(Task.id)).filter(
+            and_(
+                Task.clinic_id == current_user.clinic_id,
+                Task.completed == False
+            )
+        )
+        pending_tasks_result = await db.execute(pending_tasks_query)
+        pending_tasks_count = pending_tasks_result.scalar() or 0
+        
         # ==================== Build Response ====================
         stats = SecretaryDashboardStats(
             today_appointments_count=len(today_appointments),
             confirmed_appointments_count=confirmed_count,
             total_patients_count=total_patients,
-            pending_tasks_count=0  # TODO: Implement task system if needed
+            pending_tasks_count=pending_tasks_count
         )
         
         return SecretaryDashboardResponse(
@@ -340,4 +386,235 @@ async def get_registration_stats(
             total_registrations=0,
             active_registrations=0,
             today_updates=0
+        )
+
+
+# ==================== Task Endpoints ====================
+
+@router.get("/tasks", response_model=List[TaskResponse])
+async def get_tasks(
+    completed: Optional[bool] = None,
+    current_user: User = Depends(require_secretary),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get tasks for the current user's clinic
+    
+    Query params:
+    - completed: Filter by completion status (true/false). If not provided, returns all tasks.
+    """
+    try:
+        filters = [Task.clinic_id == current_user.clinic_id]
+        
+        if completed is not None:
+            filters.append(Task.completed == completed)
+        
+        tasks_query = select(Task).filter(and_(*filters)).order_by(
+            Task.completed.asc(),
+            Task.priority.desc(),
+            Task.created_at.desc()
+        )
+        
+        tasks_result = await db.execute(tasks_query)
+        tasks = tasks_result.scalars().all()
+        
+        return [
+            TaskResponse(
+                id=task.id,
+                title=task.title,
+                description=task.description,
+                priority=task.priority.value if isinstance(task.priority, TaskPriority) else task.priority,
+                completed=task.completed,
+                completed_at=task.completed_at,
+                due_date=task.due_date,
+                created_at=task.created_at,
+                updated_at=task.updated_at
+            )
+            for task in tasks
+        ]
+        
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        error_msg = str(e)
+        logger.error(f"Error in get_tasks: {error_msg}", exc_info=True)
+        
+        # Provide more detailed error message for debugging
+        if "does not exist" in error_msg or "no such table" in error_msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Tabela de tarefas não encontrada. Execute a migração do banco de dados."
+            )
+        
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erro ao buscar tarefas: {error_msg}"
+        )
+
+
+@router.post("/tasks", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
+async def create_task(
+    task_data: TaskCreate,
+    current_user: User = Depends(require_secretary),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Create a new task"""
+    try:
+        # Validate priority
+        priority_value = TaskPriority.MEDIUM
+        if task_data.priority:
+            try:
+                priority_value = TaskPriority(task_data.priority)
+            except ValueError:
+                priority_value = TaskPriority.MEDIUM
+        
+        new_task = Task(
+            title=task_data.title,
+            description=task_data.description,
+            priority=priority_value,
+            completed=False,
+            user_id=current_user.id,
+            clinic_id=current_user.clinic_id,
+            created_by_id=current_user.id,
+            due_date=task_data.due_date
+        )
+        
+        db.add(new_task)
+        await db.commit()
+        await db.refresh(new_task)
+        
+        return TaskResponse(
+            id=new_task.id,
+            title=new_task.title,
+            description=new_task.description,
+            priority=new_task.priority.value if isinstance(new_task.priority, TaskPriority) else new_task.priority,
+            completed=new_task.completed,
+            completed_at=new_task.completed_at,
+            due_date=new_task.due_date,
+            created_at=new_task.created_at,
+            updated_at=new_task.updated_at
+        )
+        
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error in create_task: {str(e)}", exc_info=True)
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erro ao criar tarefa"
+        )
+
+
+@router.patch("/tasks/{task_id}", response_model=TaskResponse)
+async def update_task(
+    task_id: int,
+    task_data: TaskUpdate,
+    current_user: User = Depends(require_secretary),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Update a task"""
+    try:
+        task_query = select(Task).filter(
+            and_(
+                Task.id == task_id,
+                Task.clinic_id == current_user.clinic_id
+            )
+        )
+        task_result = await db.execute(task_query)
+        task = task_result.scalar_one_or_none()
+        
+        if not task:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Tarefa não encontrada"
+            )
+        
+        # Update fields
+        if task_data.title is not None:
+            task.title = task_data.title
+        if task_data.description is not None:
+            task.description = task_data.description
+        if task_data.priority is not None:
+            try:
+                task.priority = TaskPriority(task_data.priority)
+            except ValueError:
+                pass  # Keep existing priority if invalid
+        if task_data.due_date is not None:
+            task.due_date = task_data.due_date
+        
+        # Handle completion status
+        if task_data.completed is not None:
+            task.completed = task_data.completed
+            if task_data.completed and not task.completed_at:
+                task.completed_at = datetime.now(timezone.utc)
+            elif not task_data.completed:
+                task.completed_at = None
+        
+        await db.commit()
+        await db.refresh(task)
+        
+        return TaskResponse(
+            id=task.id,
+            title=task.title,
+            description=task.description,
+            priority=task.priority.value if isinstance(task.priority, TaskPriority) else task.priority,
+            completed=task.completed,
+            completed_at=task.completed_at,
+            due_date=task.due_date,
+            created_at=task.created_at,
+            updated_at=task.updated_at
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error in update_task: {str(e)}", exc_info=True)
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erro ao atualizar tarefa"
+        )
+
+
+@router.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_task(
+    task_id: int,
+    current_user: User = Depends(require_secretary),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Delete a task"""
+    try:
+        task_query = select(Task).filter(
+            and_(
+                Task.id == task_id,
+                Task.clinic_id == current_user.clinic_id
+            )
+        )
+        task_result = await db.execute(task_query)
+        task = task_result.scalar_one_or_none()
+        
+        if not task:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Tarefa não encontrada"
+            )
+        
+        await db.delete(task)
+        await db.commit()
+        
+        return None
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error in delete_task: {str(e)}", exc_info=True)
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erro ao deletar tarefa"
         )

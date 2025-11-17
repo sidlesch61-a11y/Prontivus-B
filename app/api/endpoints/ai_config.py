@@ -4,7 +4,8 @@ Handles AI integration settings for SuperAdmin
 """
 
 from typing import Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, status
+import asyncio
+from fastapi import APIRouter, Depends, HTTPException, status, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -101,20 +102,33 @@ async def update_ai_config(
 
 @router.post("/test-connection")
 async def test_ai_connection(
+    config: Optional[Dict[str, Any]] = Body(None),
     current_user: User = Depends(require_super_admin()),
     db: AsyncSession = Depends(get_async_session)
 ):
     """
     Test AI connection (SuperAdmin only)
+    Accepts optional config in body to test with specific credentials
     """
+    import time
+    start_time = time.time()
+    
     # For now, return a mock success response
-    # In the future, this would actually test the connection
+    # In the future, this would actually test the connection with the provided config
+    provider = config.get("provider", "openai") if config else "openai"
+    model = config.get("model", "gpt-4") if config else "gpt-4"
+    
+    # Simulate connection test
+    await asyncio.sleep(0.1)
+    
+    response_time_ms = int((time.time() - start_time) * 1000)
+    
     return {
         "success": True,
         "message": "Connection test successful",
-        "provider": "openai",
-        "model": "gpt-4",
-        "response_time_ms": 250
+        "provider": provider,
+        "model": model,
+        "response_time_ms": response_time_ms
     }
 
 

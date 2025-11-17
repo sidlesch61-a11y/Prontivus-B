@@ -4,7 +4,8 @@ Handles fiscal integration settings for SuperAdmin
 """
 
 from typing import Optional, Dict, Any, List
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+import asyncio
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.exc import SQLAlchemyError
@@ -90,20 +91,33 @@ async def update_fiscal_config(
 
 @router.post("/test-connection")
 async def test_fiscal_connection(
+    config: Optional[Dict[str, Any]] = Body(None),
     current_user: User = Depends(require_super_admin()),
     db: AsyncSession = Depends(get_async_session)
 ):
     """
     Test fiscal integration connection (SuperAdmin only)
+    Accepts optional config in body to test with specific credentials
     """
+    import time
+    start_time = time.time()
+    
     # For now, return a mock success response
-    # In the future, this would actually test the connection
+    # In the future, this would actually test the connection with the provided config
+    provider = config.get("provider", "nfe") if config else "nfe"
+    environment = config.get("environment", "homologation") if config else "homologation"
+    
+    # Simulate connection test
+    await asyncio.sleep(0.1)
+    
+    response_time_ms = int((time.time() - start_time) * 1000)
+    
     return {
         "success": True,
         "message": "Connection test successful",
-        "provider": "nfe",
-        "environment": "homologation",
-        "response_time_ms": 350
+        "provider": provider,
+        "environment": environment,
+        "response_time_ms": response_time_ms
     }
 
 
@@ -170,7 +184,7 @@ async def get_fiscal_documents(
     for invoice in invoices:
         documents.append({
             "id": invoice.id,
-            "number": invoice.invoice_number or f"INV-{invoice.id:06d}",
+            "number": f"INV-{invoice.id:06d}",  # Generate invoice number from ID
             "type": "invoice",
             "status": invoice.status.value if hasattr(invoice.status, 'value') else str(invoice.status),
             "issue_date": invoice.issue_date.isoformat() if invoice.issue_date else None,
@@ -200,11 +214,14 @@ async def get_fiscal_stats(
     total_invoices = total_result.scalar() or 0
     
     # Count by status
-    issued_query = select(func.count(Invoice.id)).filter(Invoice.status == InvoiceStatus.PAID)
+    issued_query = select(func.count(Invoice.id)).filter(Invoice.status == InvoiceStatus.ISSUED)
     issued_result = await db.execute(issued_query)
     issued_count = issued_result.scalar() or 0
     
-    pending_query = select(func.count(Invoice.id)).filter(Invoice.status == InvoiceStatus.PENDING)
+    # Pending documents are those that are DRAFT or ISSUED but not PAID
+    pending_query = select(func.count(Invoice.id)).filter(
+        Invoice.status.in_([InvoiceStatus.DRAFT, InvoiceStatus.ISSUED])
+    )
     pending_result = await db.execute(pending_query)
     pending_count = pending_result.scalar() or 0
     

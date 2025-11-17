@@ -3,6 +3,7 @@ Payment Method Configuration API endpoints
 Manages payment method configurations per clinic
 """
 from typing import List, Optional
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, or_
@@ -12,12 +13,23 @@ from app.core.auth import get_current_user, RoleChecker
 from app.models import User, UserRole, PaymentMethod
 from app.models.payment_method_config import PaymentMethodConfig
 from database import get_async_session
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 router = APIRouter(prefix="/payment-methods", tags=["Payment Methods"])
 
 # Role checker for admin
 require_admin = RoleChecker([UserRole.ADMIN])
+
+
+def to_datetime_string(dt) -> Optional[str]:
+    """Convert datetime to ISO format string"""
+    if dt is None:
+        return None
+    if isinstance(dt, datetime):
+        return dt.isoformat()
+    if isinstance(dt, str):
+        return dt
+    return str(dt)
 
 
 class PaymentMethodConfigResponse(BaseModel):
@@ -30,6 +42,17 @@ class PaymentMethodConfigResponse(BaseModel):
     display_order: int
     created_at: str
     updated_at: Optional[str] = None
+    
+    @model_validator(mode='before')
+    @classmethod
+    def convert_datetimes(cls, data):
+        """Convert datetime objects to strings before validation"""
+        if isinstance(data, dict):
+            if 'created_at' in data and isinstance(data['created_at'], datetime):
+                data['created_at'] = data['created_at'].isoformat()
+            if 'updated_at' in data and isinstance(data['updated_at'], datetime):
+                data['updated_at'] = data['updated_at'].isoformat()
+        return data
     
     class Config:
         from_attributes = True
@@ -96,7 +119,23 @@ async def get_payment_methods(
             ))
         return default_configs
     
-    return [PaymentMethodConfigResponse.model_validate(config) for config in configs]
+    # Convert datetime fields to strings before validation
+    response_list = []
+    for config in configs:
+        config_dict = {
+            'id': config.id,
+            'clinic_id': config.clinic_id,
+            'method': config.method,
+            'name': config.name,
+            'is_active': config.is_active,
+            'is_default': config.is_default,
+            'display_order': config.display_order,
+            'created_at': to_datetime_string(config.created_at) or "",
+            'updated_at': to_datetime_string(config.updated_at),
+        }
+        response_list.append(PaymentMethodConfigResponse.model_validate(config_dict))
+    
+    return response_list
 
 
 @router.post("", response_model=PaymentMethodConfigResponse, status_code=status.HTTP_201_CREATED)
@@ -158,7 +197,19 @@ async def create_payment_method(
     await db.commit()
     await db.refresh(db_config)
     
-    return PaymentMethodConfigResponse.model_validate(db_config)
+    # Convert datetime fields to strings before validation
+    config_dict = {
+        'id': db_config.id,
+        'clinic_id': db_config.clinic_id,
+        'method': db_config.method,
+        'name': db_config.name,
+        'is_active': db_config.is_active,
+        'is_default': db_config.is_default,
+        'display_order': db_config.display_order,
+        'created_at': to_datetime_string(db_config.created_at) or "",
+        'updated_at': to_datetime_string(db_config.updated_at),
+    }
+    return PaymentMethodConfigResponse.model_validate(config_dict)
 
 
 @router.put("/{config_id}", response_model=PaymentMethodConfigResponse)
@@ -209,7 +260,19 @@ async def update_payment_method(
     await db.commit()
     await db.refresh(db_config)
     
-    return PaymentMethodConfigResponse.model_validate(db_config)
+    # Convert datetime fields to strings before validation
+    config_dict = {
+        'id': db_config.id,
+        'clinic_id': db_config.clinic_id,
+        'method': db_config.method,
+        'name': db_config.name,
+        'is_active': db_config.is_active,
+        'is_default': db_config.is_default,
+        'display_order': db_config.display_order,
+        'created_at': to_datetime_string(db_config.created_at) or "",
+        'updated_at': to_datetime_string(db_config.updated_at),
+    }
+    return PaymentMethodConfigResponse.model_validate(config_dict)
 
 
 @router.delete("/{config_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -288,5 +351,21 @@ async def initialize_payment_methods(
     all_result = await db.execute(all_query)
     all_configs = all_result.scalars().all()
     
-    return [PaymentMethodConfigResponse.model_validate(config) for config in all_configs]
+    # Convert datetime fields to strings before validation
+    response_list = []
+    for config in all_configs:
+        config_dict = {
+            'id': config.id,
+            'clinic_id': config.clinic_id,
+            'method': config.method,
+            'name': config.name,
+            'is_active': config.is_active,
+            'is_default': config.is_default,
+            'display_order': config.display_order,
+            'created_at': to_datetime_string(config.created_at) or "",
+            'updated_at': to_datetime_string(config.updated_at),
+        }
+        response_list.append(PaymentMethodConfigResponse.model_validate(config_dict))
+    
+    return response_list
 

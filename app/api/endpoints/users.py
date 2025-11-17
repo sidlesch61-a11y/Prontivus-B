@@ -31,6 +31,35 @@ class UserListResponse(BaseModel):
         from_attributes = True
 
 
+@router.get("/doctors", response_model=List[UserListResponse])
+async def get_doctors(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get list of doctors for patients to book appointments
+    This endpoint is accessible to all authenticated users
+    Must be defined before the generic "" route to ensure correct matching
+    """
+    from app.models import Clinic
+    query = select(User, Clinic.name).join(Clinic, User.clinic_id == Clinic.id).filter(
+        User.clinic_id == current_user.clinic_id,
+        User.role == UserRole.DOCTOR,
+        User.is_active == True
+    ).order_by(User.first_name, User.last_name)
+    
+    result = await db.execute(query)
+    doctors_data = result.all()
+    
+    doctors_list = []
+    for doctor, clinic_name in doctors_data:
+        doctor_dict = UserListResponse.model_validate(doctor).model_dump()
+        doctor_dict["clinic_name"] = clinic_name
+        doctors_list.append(doctor_dict)
+    
+    return doctors_list
+
+
 @router.get("", response_model=List[UserListResponse])
 async def list_users(
     current_user: User = Depends(require_staff),
@@ -39,6 +68,7 @@ async def list_users(
 ):
     """
     List users in the current clinic, optionally filtered by role
+    Requires staff role (admin, secretary, or doctor)
     """
     from app.models import Clinic
     query = select(User, Clinic.name).join(Clinic, User.clinic_id == Clinic.id).filter(
@@ -61,34 +91,6 @@ async def list_users(
         users_list.append(user_dict)
     
     return users_list
-
-
-@router.get("/doctors", response_model=List[UserListResponse])
-async def get_doctors(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_async_session),
-):
-    """
-    Get list of doctors for patients to book appointments
-    This endpoint is accessible to all authenticated users
-    """
-    from app.models import Clinic
-    query = select(User, Clinic.name).join(Clinic, User.clinic_id == Clinic.id).filter(
-        User.clinic_id == current_user.clinic_id,
-        User.role == UserRole.DOCTOR,
-        User.is_active == True
-    ).order_by(User.first_name, User.last_name)
-    
-    result = await db.execute(query)
-    doctors_data = result.all()
-    
-    doctors_list = []
-    for doctor, clinic_name in doctors_data:
-        doctor_dict = UserListResponse.model_validate(doctor).model_dump()
-        doctor_dict["clinic_name"] = clinic_name
-        doctors_list.append(doctor_dict)
-    
-    return doctors_list
 
 
 class UserCreateRequest(BaseModel):

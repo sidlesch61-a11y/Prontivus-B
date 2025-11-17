@@ -324,6 +324,8 @@ from app.models.message import MessageThread, Message, MessageStatus
 from app.models.menu import UserRole as UserRoleModel, MenuGroup, MenuItem
 from app.models.payment_method_config import PaymentMethodConfig
 from app.models.report_config import ReportConfig
+from app.models.task import Task, TaskPriority
+from app.models.support import SupportTicket, HelpArticle, TicketStatus, TicketPriority
 
 # Export all models
 __all__ = [
@@ -390,5 +392,11 @@ __all__ = [
     "MenuItem",
     "PaymentMethodConfig",
     "ReportConfig",
+    "Task",
+    "TaskPriority",
+    "SupportTicket",
+    "HelpArticle",
+    "TicketStatus",
+    "TicketPriority",
 ]
 

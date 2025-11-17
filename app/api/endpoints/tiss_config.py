@@ -2,13 +2,14 @@
 TISS Configuration Endpoints
 Stores and retrieves per-clinic TISS configuration
 """
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError, ProgrammingError
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from app.core.auth import get_current_user
+from app.middleware.permissions import require_super_admin
 from database import get_async_session
 from app.models import User
 from app.models.tiss_config import TissConfig
@@ -78,6 +79,68 @@ async def upsert_tiss_config(
         return {"message": "TISS config saved"}
     except (ProgrammingError, SQLAlchemyError) as e:
         # Surface a friendly error if table is missing; frontend can guide to run migrations
+        raise HTTPException(status_code=500, detail="TISS config storage not initialized. Run migrations.")
+
+
+@router.get("/admin/{clinic_id}")
+async def get_tiss_config_for_clinic(
+    clinic_id: int,
+    current_user: User = Depends(require_super_admin()),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get TISS config for a specific clinic (SuperAdmin only)
+    """
+    try:
+        result = await db.execute(select(TissConfig).where(TissConfig.clinic_id == clinic_id))
+        cfg = result.scalar_one_or_none()
+        if not cfg:
+            return _defaults()
+        return {
+            "prestador": cfg.prestador or {},
+            "operadora": cfg.operadora or {},
+            "defaults": cfg.defaults or {},
+            "tiss": cfg.tiss or {},
+        }
+    except (ProgrammingError, SQLAlchemyError):
+        return _defaults()
+
+
+@router.put("/admin/{clinic_id}")
+async def upsert_tiss_config_for_clinic(
+    clinic_id: int,
+    payload: Dict[str, Any],
+    current_user: User = Depends(require_super_admin()),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Update TISS config for a specific clinic (SuperAdmin only)
+    """
+    try:
+        result = await db.execute(select(TissConfig).where(TissConfig.clinic_id == clinic_id))
+        cfg = result.scalar_one_or_none()
+        if not cfg:
+            cfg = TissConfig(
+                clinic_id=clinic_id,
+                prestador=payload.get("prestador", {}),
+                operadora=payload.get("operadora", {}),
+                defaults=payload.get("defaults", {}),
+                tiss=payload.get("tiss", {}),
+            )
+            db.add(cfg)
+        else:
+            if "prestador" in payload:
+                cfg.prestador = payload["prestador"]
+            if "operadora" in payload:
+                cfg.operadora = payload["operadora"]
+            if "defaults" in payload:
+                cfg.defaults = payload["defaults"]
+            if "tiss" in payload:
+                cfg.tiss = payload["tiss"]
+
+        await db.commit()
+        return {"message": "TISS config saved"}
+    except (ProgrammingError, SQLAlchemyError) as e:
         raise HTTPException(status_code=500, detail="TISS config storage not initialized. Run migrations.")
 
 

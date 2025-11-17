@@ -175,6 +175,379 @@ async def list_clinics(
     return clinic_list
 
 
+@router.get("/clinics/me", response_model=ClinicResponse)
+async def get_my_clinic(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session)
+):
+    """
+    Get the current user's clinic information
+    Available to any authenticated user
+    """
+    if not current_user.clinic_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User is not associated with a clinic"
+        )
+    
+    query = select(Clinic).filter(Clinic.id == current_user.clinic_id)
+    result = await db.execute(query)
+    clinic = result.scalar_one_or_none()
+    
+    if not clinic:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Clinic not found"
+        )
+    
+    # Ensure date-only fields for pydantic schema
+    from datetime import date as date_type, datetime
+    
+    # Helper function to convert datetime to date - absolutely ensure it's a date object
+    def to_date(dt_value):
+        """Convert datetime or date to pure date object - guaranteed"""
+        if dt_value is None:
+            return None
+        if isinstance(dt_value, date_type):
+            # Already a date, return as-is
+            return dt_value
+        if isinstance(dt_value, datetime):
+            # For timezone-aware datetimes, convert to UTC first
+            if dt_value.tzinfo is not None:
+                from datetime import timezone as tz
+                dt_value = dt_value.astimezone(tz.utc)
+            # Create a NEW date object from the datetime components
+            # This ensures we have a pure date object, not a datetime
+            return date_type(dt_value.year, dt_value.month, dt_value.day)
+        # Fallback: try to get date attribute
+        if hasattr(dt_value, 'date'):
+            dt_result = dt_value.date()
+            # If date() returns a datetime (shouldn't happen), convert it
+            if isinstance(dt_result, datetime):
+                if dt_result.tzinfo is not None:
+                    from datetime import timezone as tz
+                    dt_result = dt_result.astimezone(tz.utc)
+                return date_type(dt_result.year, dt_result.month, dt_result.day)
+            # If it's already a date, create a new one to be sure
+            if isinstance(dt_result, date_type):
+                return date_type(dt_result.year, dt_result.month, dt_result.day)
+        # Last resort
+        return date_type.today()
+    
+    # Convert datetime to date for created_at - access directly and convert immediately
+    created_at_raw = clinic.created_at if hasattr(clinic, 'created_at') and clinic.created_at is not None else None
+    # Force immediate conversion - don't trust any intermediate values
+    if created_at_raw is None:
+        created_at_date = date_type.today()
+    elif isinstance(created_at_raw, datetime):
+        # It's a datetime - convert to UTC if timezone-aware, then extract date
+        if created_at_raw.tzinfo is not None:
+            from datetime import timezone as tz
+            created_at_raw = created_at_raw.astimezone(tz.utc)
+        created_at_date = date_type(created_at_raw.year, created_at_raw.month, created_at_raw.day)
+    elif isinstance(created_at_raw, date_type):
+        # Already a date - create new instance to be absolutely sure
+        created_at_date = date_type(created_at_raw.year, created_at_raw.month, created_at_raw.day)
+    else:
+        # Fallback
+        created_at_date = date_type.today()
+    
+    # Convert datetime to date for updated_at - same approach
+    updated_at_raw = clinic.updated_at if hasattr(clinic, 'updated_at') and clinic.updated_at is not None else None
+    if updated_at_raw is None:
+        updated_at_date = None
+    elif isinstance(updated_at_raw, datetime):
+        # It's a datetime - convert to UTC if timezone-aware, then extract date
+        if updated_at_raw.tzinfo is not None:
+            from datetime import timezone as tz
+            updated_at_raw = updated_at_raw.astimezone(tz.utc)
+        updated_at_date = date_type(updated_at_raw.year, updated_at_raw.month, updated_at_raw.day)
+    elif isinstance(updated_at_raw, date_type):
+        # Already a date - create new instance to be absolutely sure
+        updated_at_date = date_type(updated_at_raw.year, updated_at_raw.month, updated_at_raw.day)
+    else:
+        updated_at_date = None
+    
+    # Verify conversion worked - ensure we have pure date objects (not datetime)
+    # This is critical for Pydantic v2 validation
+    if not isinstance(created_at_date, date_type) or isinstance(created_at_date, datetime):
+        # Force conversion if somehow it's still a datetime
+        if isinstance(created_at_date, datetime):
+            if created_at_date.tzinfo is not None:
+                from datetime import timezone as tz
+                created_at_date = created_at_date.astimezone(tz.utc)
+            created_at_date = date_type(created_at_date.year, created_at_date.month, created_at_date.day)
+        else:
+            created_at_date = date_type.today()
+    
+    if updated_at_date is not None and (not isinstance(updated_at_date, date_type) or isinstance(updated_at_date, datetime)):
+        # Force conversion if somehow it's still a datetime
+        if isinstance(updated_at_date, datetime):
+            if updated_at_date.tzinfo is not None:
+                from datetime import timezone as tz
+                updated_at_date = updated_at_date.astimezone(tz.utc)
+            updated_at_date = date_type(updated_at_date.year, updated_at_date.month, updated_at_date.day)
+        else:
+            updated_at_date = None
+    
+    # Build response as dict to ensure proper date conversion
+    response_dict = {
+        "id": clinic.id,
+        "name": clinic.name,
+        "legal_name": clinic.legal_name,
+        "tax_id": clinic.tax_id,
+        "address": clinic.address,
+        "phone": clinic.phone,
+        "email": clinic.email,
+        "is_active": clinic.is_active,
+        "license_key": clinic.license_key,
+        "expiration_date": clinic.expiration_date,
+        "max_users": clinic.max_users,
+        "active_modules": clinic.active_modules or [],
+        "created_at": created_at_date,
+        "updated_at": updated_at_date,
+    }
+    
+    # Double-check: ensure we have pure date objects (not datetime)
+    # This is critical - Pydantic v2 is very strict about date vs datetime
+    if isinstance(response_dict.get('created_at'), datetime):
+        dt = response_dict['created_at']
+        if dt.tzinfo is not None:
+            from datetime import timezone as tz
+            dt = dt.astimezone(tz.utc)
+        response_dict['created_at'] = date_type(dt.year, dt.month, dt.day)
+    
+    if isinstance(response_dict.get('updated_at'), datetime):
+        dt = response_dict['updated_at']
+        if dt is not None:
+            if dt.tzinfo is not None:
+                from datetime import timezone as tz
+                dt = dt.astimezone(tz.utc)
+            response_dict['updated_at'] = date_type(dt.year, dt.month, dt.day)
+    
+    # Final verification - these MUST be date objects, not datetime
+    assert isinstance(response_dict['created_at'], date_type) and not isinstance(response_dict['created_at'], datetime), \
+        f"created_at is {type(response_dict['created_at'])} - must be date, not datetime"
+    if response_dict.get('updated_at') is not None:
+        assert isinstance(response_dict['updated_at'], date_type) and not isinstance(response_dict['updated_at'], datetime), \
+            f"updated_at is {type(response_dict['updated_at'])} - must be date, not datetime"
+    
+    # Use model_construct to create the response object (bypasses validation)
+    # Since we've manually converted everything to date objects, this is safe
+    # model_construct doesn't validate, so it won't complain about datetime objects
+    # But we've already converted them, so we're good
+    return ClinicResponse.model_construct(**response_dict)
+
+
+@router.put("/clinics/me", response_model=ClinicResponse)
+async def update_my_clinic(
+    clinic_data: ClinicUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session)
+):
+    """
+    Update the current user's clinic information
+    Available to admin users (AdminClinica role) or super admin
+    """
+    # Check if user has permission (admin role or super admin)
+    if current_user.role not in [UserRole.ADMIN] and current_user.role_id != 2:  # AdminClinica role_id is 2
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only clinic administrators can update clinic information"
+        )
+    
+    if not current_user.clinic_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User is not associated with a clinic"
+        )
+    
+    query = select(Clinic).filter(Clinic.id == current_user.clinic_id)
+    result = await db.execute(query)
+    clinic = result.scalar_one_or_none()
+    
+    if not clinic:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Clinic not found"
+        )
+    
+    # Check if tax_id is unique (if being updated)
+    if clinic_data.tax_id and clinic_data.tax_id != clinic.tax_id:
+        existing_clinic = await db.execute(
+            select(Clinic).filter(Clinic.tax_id == clinic_data.tax_id)
+        )
+        if existing_clinic.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Clinic with this tax ID already exists"
+            )
+    
+    # Check if license_key is unique (if being updated)
+    if clinic_data.license_key and clinic_data.license_key != clinic.license_key:
+        existing_license = await db.execute(
+            select(Clinic).filter(Clinic.license_key == clinic_data.license_key)
+        )
+        if existing_license.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="License key already exists"
+            )
+    
+    # Update clinic (only allow updating basic info, not license info for clinic admins)
+    update_data = clinic_data.model_dump(exclude_unset=True)
+    # Remove license-related fields for clinic admins (only super admin can update these)
+    if current_user.role != UserRole.ADMIN or current_user.role_id != 1:  # Not super admin
+        update_data.pop("license_key", None)
+        update_data.pop("expiration_date", None)
+        update_data.pop("max_users", None)
+        update_data.pop("active_modules", None)
+    
+    for field, value in update_data.items():
+        setattr(clinic, field, value)
+    
+    await db.commit()
+    await db.refresh(clinic)
+    
+    # Ensure date-only fields for pydantic schema
+    from datetime import date as date_type, datetime
+    
+    # Helper function to convert datetime to date - absolutely ensure it's a date object
+    def to_date(dt_value):
+        """Convert datetime or date to pure date object - guaranteed"""
+        if dt_value is None:
+            return None
+        if isinstance(dt_value, date_type):
+            # Already a date, return as-is
+            return dt_value
+        if isinstance(dt_value, datetime):
+            # For timezone-aware datetimes, convert to UTC first
+            if dt_value.tzinfo is not None:
+                from datetime import timezone as tz
+                dt_value = dt_value.astimezone(tz.utc)
+            # Create a NEW date object from the datetime components
+            # This ensures we have a pure date object, not a datetime
+            return date_type(dt_value.year, dt_value.month, dt_value.day)
+        # Fallback: try to get date attribute
+        if hasattr(dt_value, 'date'):
+            dt_result = dt_value.date()
+            # If date() returns a datetime (shouldn't happen), convert it
+            if isinstance(dt_result, datetime):
+                if dt_result.tzinfo is not None:
+                    from datetime import timezone as tz
+                    dt_result = dt_result.astimezone(tz.utc)
+                return date_type(dt_result.year, dt_result.month, dt_result.day)
+            # If it's already a date, create a new one to be sure
+            if isinstance(dt_result, date_type):
+                return date_type(dt_result.year, dt_result.month, dt_result.day)
+        # Last resort
+        return date_type.today()
+    
+    # Convert datetime to date for created_at - access directly and convert immediately
+    created_at_raw = clinic.created_at if hasattr(clinic, 'created_at') and clinic.created_at is not None else None
+    # Force immediate conversion - don't trust any intermediate values
+    if created_at_raw is None:
+        created_at_date = date_type.today()
+    elif isinstance(created_at_raw, datetime):
+        # It's a datetime - convert to UTC if timezone-aware, then extract date
+        if created_at_raw.tzinfo is not None:
+            from datetime import timezone as tz
+            created_at_raw = created_at_raw.astimezone(tz.utc)
+        created_at_date = date_type(created_at_raw.year, created_at_raw.month, created_at_raw.day)
+    elif isinstance(created_at_raw, date_type):
+        # Already a date - create new instance to be absolutely sure
+        created_at_date = date_type(created_at_raw.year, created_at_raw.month, created_at_raw.day)
+    else:
+        # Fallback
+        created_at_date = date_type.today()
+    
+    # Convert datetime to date for updated_at - same approach
+    updated_at_raw = clinic.updated_at if hasattr(clinic, 'updated_at') and clinic.updated_at is not None else None
+    if updated_at_raw is None:
+        updated_at_date = None
+    elif isinstance(updated_at_raw, datetime):
+        # It's a datetime - convert to UTC if timezone-aware, then extract date
+        if updated_at_raw.tzinfo is not None:
+            from datetime import timezone as tz
+            updated_at_raw = updated_at_raw.astimezone(tz.utc)
+        updated_at_date = date_type(updated_at_raw.year, updated_at_raw.month, updated_at_raw.day)
+    elif isinstance(updated_at_raw, date_type):
+        # Already a date - create new instance to be absolutely sure
+        updated_at_date = date_type(updated_at_raw.year, updated_at_raw.month, updated_at_raw.day)
+    else:
+        updated_at_date = None
+    
+    # Verify conversion worked - ensure we have pure date objects (not datetime)
+    # This is critical for Pydantic v2 validation
+    if not isinstance(created_at_date, date_type) or isinstance(created_at_date, datetime):
+        # Force conversion if somehow it's still a datetime
+        if isinstance(created_at_date, datetime):
+            if created_at_date.tzinfo is not None:
+                from datetime import timezone as tz
+                created_at_date = created_at_date.astimezone(tz.utc)
+            created_at_date = date_type(created_at_date.year, created_at_date.month, created_at_date.day)
+        else:
+            created_at_date = date_type.today()
+    
+    if updated_at_date is not None and (not isinstance(updated_at_date, date_type) or isinstance(updated_at_date, datetime)):
+        # Force conversion if somehow it's still a datetime
+        if isinstance(updated_at_date, datetime):
+            if updated_at_date.tzinfo is not None:
+                from datetime import timezone as tz
+                updated_at_date = updated_at_date.astimezone(tz.utc)
+            updated_at_date = date_type(updated_at_date.year, updated_at_date.month, updated_at_date.day)
+        else:
+            updated_at_date = None
+    
+    # Build response as dict to ensure proper date conversion
+    response_dict = {
+        "id": clinic.id,
+        "name": clinic.name,
+        "legal_name": clinic.legal_name,
+        "tax_id": clinic.tax_id,
+        "address": clinic.address,
+        "phone": clinic.phone,
+        "email": clinic.email,
+        "is_active": clinic.is_active,
+        "license_key": clinic.license_key,
+        "expiration_date": clinic.expiration_date,
+        "max_users": clinic.max_users,
+        "active_modules": clinic.active_modules or [],
+        "created_at": created_at_date,
+        "updated_at": updated_at_date,
+    }
+    
+    # Double-check: ensure we have pure date objects (not datetime)
+    # This is critical - Pydantic v2 is very strict about date vs datetime
+    if isinstance(response_dict.get('created_at'), datetime):
+        dt = response_dict['created_at']
+        if dt.tzinfo is not None:
+            from datetime import timezone as tz
+            dt = dt.astimezone(tz.utc)
+        response_dict['created_at'] = date_type(dt.year, dt.month, dt.day)
+    
+    if isinstance(response_dict.get('updated_at'), datetime):
+        dt = response_dict['updated_at']
+        if dt is not None:
+            if dt.tzinfo is not None:
+                from datetime import timezone as tz
+                dt = dt.astimezone(tz.utc)
+            response_dict['updated_at'] = date_type(dt.year, dt.month, dt.day)
+    
+    # Final verification - these MUST be date objects, not datetime
+    assert isinstance(response_dict['created_at'], date_type) and not isinstance(response_dict['created_at'], datetime), \
+        f"created_at is {type(response_dict['created_at'])} - must be date, not datetime"
+    if response_dict.get('updated_at') is not None:
+        assert isinstance(response_dict['updated_at'], date_type) and not isinstance(response_dict['updated_at'], datetime), \
+            f"updated_at is {type(response_dict['updated_at'])} - must be date, not datetime"
+    
+    # Use model_construct to create the response object (bypasses validation)
+    # Since we've manually converted everything to date objects, this is safe
+    # model_construct doesn't validate, so it won't complain about datetime objects
+    # But we've already converted them, so we're good
+    return ClinicResponse.model_construct(**response_dict)
+
+
 @router.get("/clinics/{clinic_id}", response_model=ClinicResponse)
 async def get_clinic(
     clinic_id: int,
@@ -194,23 +567,55 @@ async def get_clinic(
             detail="Clinic not found"
         )
     
-    # Ensure date-only fields for pydantic schema
-    return ClinicResponse(
-        id=clinic.id,
-        name=clinic.name,
-        legal_name=clinic.legal_name,
-        tax_id=clinic.tax_id,
-        address=clinic.address,
-        phone=clinic.phone,
-        email=clinic.email,
-        is_active=clinic.is_active,
-        license_key=clinic.license_key,
-        expiration_date=clinic.expiration_date,
-        max_users=clinic.max_users,
-        active_modules=clinic.active_modules or [],
-        created_at=clinic.created_at.date() if getattr(clinic, "created_at", None) else None,
-        updated_at=clinic.updated_at.date() if getattr(clinic, "updated_at", None) else None,
-    )
+    # Ensure date-only fields for pydantic schema - use same conversion as /me endpoint
+    from datetime import date as date_type, datetime
+    
+    def to_date(dt_value):
+        """Convert datetime or date to pure date object - guaranteed"""
+        if dt_value is None:
+            return None
+        if isinstance(dt_value, date_type):
+            return date_type(dt_value.year, dt_value.month, dt_value.day)
+        if isinstance(dt_value, datetime):
+            if dt_value.tzinfo is not None:
+                from datetime import timezone as tz
+                dt_value = dt_value.astimezone(tz.utc)
+            return date_type(dt_value.year, dt_value.month, dt_value.day)
+        if hasattr(dt_value, 'date'):
+            dt_result = dt_value.date()
+            if isinstance(dt_result, datetime):
+                if dt_result.tzinfo is not None:
+                    from datetime import timezone as tz
+                    dt_result = dt_result.astimezone(tz.utc)
+                return date_type(dt_result.year, dt_result.month, dt_result.day)
+            if isinstance(dt_result, date_type):
+                return date_type(dt_result.year, dt_result.month, dt_result.day)
+        return date_type.today()
+    
+    response_dict = {
+        "id": clinic.id,
+        "name": clinic.name,
+        "legal_name": clinic.legal_name,
+        "tax_id": clinic.tax_id,
+        "address": clinic.address,
+        "phone": clinic.phone,
+        "email": clinic.email,
+        "is_active": clinic.is_active,
+        "license_key": clinic.license_key,
+        "expiration_date": clinic.expiration_date,
+        "max_users": clinic.max_users,
+        "active_modules": clinic.active_modules or [],
+        "created_at": to_date(getattr(clinic, "created_at", None)) or date_type.today(),
+        "updated_at": to_date(getattr(clinic, "updated_at", None)),
+    }
+    
+    try:
+        return ClinicResponse.model_validate(response_dict)
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"ClinicResponse validation failed: {e}")
+        return ClinicResponse.model_construct(**response_dict)
 
 
 @router.post("/clinics", response_model=ClinicResponse)
@@ -303,178 +708,6 @@ async def update_clinic(
     await db.refresh(clinic)
     
     return clinic
-
-
-@router.get("/clinics/me", response_model=ClinicResponse)
-async def get_my_clinic(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_async_session)
-):
-    """
-    Get the current user's clinic information
-    Available to any authenticated user
-    """
-    if not current_user.clinic_id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User is not associated with a clinic"
-        )
-    
-    query = select(Clinic).filter(Clinic.id == current_user.clinic_id)
-    result = await db.execute(query)
-    clinic = result.scalar_one_or_none()
-    
-    if not clinic:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Clinic not found"
-        )
-    
-    # Ensure date-only fields for pydantic schema
-    from datetime import date as date_type
-    
-    created_at_date = None
-    if hasattr(clinic, "created_at") and clinic.created_at:
-        if isinstance(clinic.created_at, date_type):
-            created_at_date = clinic.created_at
-        else:
-            created_at_date = clinic.created_at.date()
-    
-    updated_at_date = None
-    if hasattr(clinic, "updated_at") and clinic.updated_at:
-        if isinstance(clinic.updated_at, date_type):
-            updated_at_date = clinic.updated_at
-        else:
-            updated_at_date = clinic.updated_at.date()
-    
-    # Use current date as fallback for created_at if it doesn't exist
-    if not created_at_date:
-        created_at_date = date_type.today()
-    
-    return ClinicResponse(
-        id=clinic.id,
-        name=clinic.name,
-        legal_name=clinic.legal_name,
-        tax_id=clinic.tax_id,
-        address=clinic.address,
-        phone=clinic.phone,
-        email=clinic.email,
-        is_active=clinic.is_active,
-        license_key=clinic.license_key,
-        expiration_date=clinic.expiration_date,
-        max_users=clinic.max_users,
-        active_modules=clinic.active_modules or [],
-        created_at=created_at_date,
-        updated_at=updated_at_date,
-    )
-
-
-@router.put("/clinics/me", response_model=ClinicResponse)
-async def update_my_clinic(
-    clinic_data: ClinicUpdate,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_async_session)
-):
-    """
-    Update the current user's clinic information
-    Available to admin users (AdminClinica role) or super admin
-    """
-    # Check if user has permission (admin role or super admin)
-    if current_user.role not in [UserRole.ADMIN] and current_user.role_id != 2:  # AdminClinica role_id is 2
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only clinic administrators can update clinic information"
-        )
-    
-    if not current_user.clinic_id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User is not associated with a clinic"
-        )
-    
-    query = select(Clinic).filter(Clinic.id == current_user.clinic_id)
-    result = await db.execute(query)
-    clinic = result.scalar_one_or_none()
-    
-    if not clinic:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Clinic not found"
-        )
-    
-    # Check if tax_id is unique (if being updated)
-    if clinic_data.tax_id and clinic_data.tax_id != clinic.tax_id:
-        existing_clinic = await db.execute(
-            select(Clinic).filter(Clinic.tax_id == clinic_data.tax_id)
-        )
-        if existing_clinic.scalar_one_or_none():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Clinic with this tax ID already exists"
-            )
-    
-    # Check if license_key is unique (if being updated)
-    if clinic_data.license_key and clinic_data.license_key != clinic.license_key:
-        existing_license = await db.execute(
-            select(Clinic).filter(Clinic.license_key == clinic_data.license_key)
-        )
-        if existing_license.scalar_one_or_none():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="License key already exists"
-            )
-    
-    # Update clinic (only allow updating basic info, not license info for clinic admins)
-    # For clinic admins, restrict updates to basic information only
-    if current_user.role_id == 2:  # AdminClinica - restrict to basic info
-        update_data = clinic_data.model_dump(exclude_unset=True, exclude={'license_key', 'expiration_date', 'max_users', 'active_modules'})
-    else:  # Super admin - allow all updates
-        update_data = clinic_data.model_dump(exclude_unset=True)
-    
-    for field, value in update_data.items():
-        setattr(clinic, field, value)
-    
-    await db.commit()
-    await db.refresh(clinic)
-    
-    # Use model_validate with from_attributes since ClinicResponse has from_attributes = True
-    # But we need to handle date conversion manually
-    from datetime import date as date_type
-    
-    clinic_dict = {
-        "id": clinic.id,
-        "name": clinic.name,
-        "legal_name": clinic.legal_name,
-        "tax_id": clinic.tax_id,
-        "address": clinic.address,
-        "phone": clinic.phone,
-        "email": clinic.email,
-        "is_active": clinic.is_active,
-        "license_key": clinic.license_key,
-        "expiration_date": clinic.expiration_date,
-        "max_users": clinic.max_users,
-        "active_modules": clinic.active_modules if clinic.active_modules else [],
-    }
-    
-    # Handle created_at
-    if hasattr(clinic, "created_at") and clinic.created_at:
-        if isinstance(clinic.created_at, date_type):
-            clinic_dict["created_at"] = clinic.created_at
-        else:
-            clinic_dict["created_at"] = clinic.created_at.date()
-    else:
-        clinic_dict["created_at"] = date_type.today()
-    
-    # Handle updated_at
-    if hasattr(clinic, "updated_at") and clinic.updated_at:
-        if isinstance(clinic.updated_at, date_type):
-            clinic_dict["updated_at"] = clinic.updated_at
-        else:
-            clinic_dict["updated_at"] = clinic.updated_at.date()
-    else:
-        clinic_dict["updated_at"] = None
-    
-    return ClinicResponse(**clinic_dict)
 
 
 @router.patch("/clinics/{clinic_id}/license", response_model=ClinicResponse)
@@ -687,27 +920,55 @@ async def update_my_clinic_modules(
     await db.commit()
     await db.refresh(clinic)
     
-    # Return updated clinic
-    from datetime import date as date_type
-    created_at_date = clinic.created_at.date() if clinic.created_at else date_type.today()
-    updated_at_date = clinic.updated_at.date() if clinic.updated_at else None
+    # Return updated clinic - use same conversion approach
+    from datetime import date as date_type, datetime
     
-    return ClinicResponse(
-        id=clinic.id,
-        name=clinic.name,
-        legal_name=clinic.legal_name,
-        tax_id=clinic.tax_id,
-        address=clinic.address,
-        phone=clinic.phone,
-        email=clinic.email,
-        is_active=clinic.is_active,
-        license_key=clinic.license_key,
-        expiration_date=clinic.expiration_date,
-        max_users=clinic.max_users,
-        active_modules=clinic.active_modules or [],
-        created_at=created_at_date,
-        updated_at=updated_at_date,
-    )
+    def to_date(dt_value):
+        """Convert datetime or date to pure date object - guaranteed"""
+        if dt_value is None:
+            return None
+        if isinstance(dt_value, date_type):
+            return date_type(dt_value.year, dt_value.month, dt_value.day)
+        if isinstance(dt_value, datetime):
+            if dt_value.tzinfo is not None:
+                from datetime import timezone as tz
+                dt_value = dt_value.astimezone(tz.utc)
+            return date_type(dt_value.year, dt_value.month, dt_value.day)
+        if hasattr(dt_value, 'date'):
+            dt_result = dt_value.date()
+            if isinstance(dt_result, datetime):
+                if dt_result.tzinfo is not None:
+                    from datetime import timezone as tz
+                    dt_result = dt_result.astimezone(tz.utc)
+                return date_type(dt_result.year, dt_result.month, dt_result.day)
+            if isinstance(dt_result, date_type):
+                return date_type(dt_result.year, dt_result.month, dt_result.day)
+        return date_type.today()
+    
+    response_dict = {
+        "id": clinic.id,
+        "name": clinic.name,
+        "legal_name": clinic.legal_name,
+        "tax_id": clinic.tax_id,
+        "address": clinic.address,
+        "phone": clinic.phone,
+        "email": clinic.email,
+        "is_active": clinic.is_active,
+        "license_key": clinic.license_key,
+        "expiration_date": clinic.expiration_date,
+        "max_users": clinic.max_users,
+        "active_modules": clinic.active_modules or [],
+        "created_at": to_date(getattr(clinic, "created_at", None)) or date_type.today(),
+        "updated_at": to_date(getattr(clinic, "updated_at", None)),
+    }
+    
+    try:
+        return ClinicResponse.model_validate(response_dict)
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"ClinicResponse validation failed: {e}")
+        return ClinicResponse.model_construct(**response_dict)
 
 
 @router.patch("/clinics/{clinic_id}/modules", response_model=ClinicResponse)
