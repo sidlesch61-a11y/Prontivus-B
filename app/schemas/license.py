@@ -20,6 +20,8 @@ class LicenseBase(BaseModel):
     end_at: datetime = Field(..., description="License end date")
     status: LicenseStatus = Field(default=LicenseStatus.ACTIVE, description="License status")
     signature: Optional[str] = Field(None, description="License signature for validation")
+    ai_token_limit: Optional[int] = Field(None, ge=-1, description="AI tokens limit per month (-1 for unlimited, null for plan default)")
+    ai_enabled: bool = Field(default=False, description="Whether AI module is enabled")
 
     @validator('modules')
     def validate_modules(cls, v):
@@ -31,7 +33,7 @@ class LicenseBase(BaseModel):
         valid_modules = [
             'patients', 'appointments', 'clinical', 'financial', 'stock',
             'procedures', 'tiss', 'bi', 'telemed', 'mobile', 'api',
-            'reports', 'backup', 'integration'
+            'reports', 'backup', 'integration', 'ai'
         ]
         
         for module in v:
@@ -78,6 +80,8 @@ class LicenseUpdate(BaseModel):
     end_at: Optional[datetime] = None
     status: Optional[LicenseStatus] = None
     signature: Optional[str] = None
+    ai_token_limit: Optional[int] = Field(None, ge=-1, description="AI tokens limit per month (-1 for unlimited, null for plan default)")
+    ai_enabled: Optional[bool] = Field(None, description="Whether AI module is enabled")
 
     @validator('modules')
     def validate_modules(cls, v):
@@ -106,6 +110,8 @@ class LicenseResponse(LicenseBase):
     is_active: bool = Field(..., description="Whether license is currently active")
     is_expired: bool = Field(..., description="Whether license has expired")
     days_until_expiry: int = Field(..., description="Days until license expires")
+    ai_token_limit: Optional[int] = Field(None, description="AI tokens limit per month")
+    ai_enabled: bool = Field(default=False, description="Whether AI module is enabled")
 
     class Config:
         from_attributes = True

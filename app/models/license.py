@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional, Dict, Any, List
-from sqlalchemy import Column, String, Integer, DateTime, Text, ForeignKey, JSON, Enum as SQLEnum
+from sqlalchemy import Column, String, Integer, DateTime, Text, ForeignKey, JSON, Enum as SQLEnum, Boolean
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -47,6 +47,10 @@ class License(Base):
     modules = Column(JSON, nullable=False, default=list)  # List of enabled modules
     users_limit = Column(Integer, nullable=False, default=1)
     units_limit = Column(Integer, nullable=True)  # For multi-clinic licenses
+    
+    # AI Integration Limits (tokens per month)
+    ai_token_limit = Column(Integer, nullable=True)  # null = unlimited, 0 = disabled
+    ai_enabled = Column(Boolean, default=False, nullable=False)  # Whether AI module is enabled
     
     # License period
     start_at = Column(DateTime(timezone=True), nullable=False, default=func.now())

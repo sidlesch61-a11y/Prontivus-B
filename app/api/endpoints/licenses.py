@@ -125,6 +125,25 @@ async def create_license(body: LicenseCreate, db: AsyncSession = Depends(get_db)
     }
     signature = _sign_payload(payload)
 
+    # Calculate AI token limit if not provided
+    ai_token_limit = body.ai_token_limit
+    if ai_token_limit is None:
+        # Set default based on plan
+        plan_str = payload["plan"].lower() if isinstance(payload["plan"], str) else str(payload["plan"]).lower()
+        if plan_str == "basic":
+            ai_token_limit = 10_000
+        elif plan_str == "professional":
+            ai_token_limit = 100_000
+        elif plan_str == "enterprise":
+            ai_token_limit = 1_000_000
+        elif plan_str == "custom":
+            ai_token_limit = -1  # Unlimited
+        else:
+            ai_token_limit = 0  # Disabled by default
+    
+    # Determine if AI is enabled (check if "ai" is in modules or ai_enabled is True)
+    ai_enabled = body.ai_enabled or ("ai" in body.modules)
+    
     try:
         # Create license
         license_obj = License(
@@ -137,6 +156,8 @@ async def create_license(body: LicenseCreate, db: AsyncSession = Depends(get_db)
             end_at=body.end_at,
             status=LicenseStatus.SUSPENDED,
             signature=signature,
+            ai_token_limit=ai_token_limit,
+            ai_enabled=ai_enabled,
         )
 
         db.add(license_obj)
