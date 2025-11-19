@@ -3,7 +3,7 @@ License model for the licensing module
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional, Dict, Any, List
 from sqlalchemy import Column, String, Integer, DateTime, Text, ForeignKey, JSON, Enum as SQLEnum
@@ -78,23 +78,40 @@ class License(Base):
     @property
     def is_active(self) -> bool:
         """Check if license is currently active"""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
+        # Ensure start_at and end_at are timezone-aware
+        start_at = self.start_at
+        end_at = self.end_at
+        if start_at.tzinfo is None:
+            start_at = start_at.replace(tzinfo=timezone.utc)
+        if end_at.tzinfo is None:
+            end_at = end_at.replace(tzinfo=timezone.utc)
         return (
             self.status == LicenseStatus.ACTIVE and
-            self.start_at <= now <= self.end_at
+            start_at <= now <= end_at
         )
     
     @property
     def is_expired(self) -> bool:
         """Check if license has expired"""
-        return datetime.utcnow() > self.end_at
+        now = datetime.now(timezone.utc)
+        # Ensure end_at is timezone-aware
+        end_at = self.end_at
+        if end_at.tzinfo is None:
+            end_at = end_at.replace(tzinfo=timezone.utc)
+        return now > end_at
     
     @property
     def days_until_expiry(self) -> int:
         """Get days until license expires"""
         if self.is_expired:
             return 0
-        delta = self.end_at - datetime.utcnow()
+        now = datetime.now(timezone.utc)
+        # Ensure end_at is timezone-aware
+        end_at = self.end_at
+        if end_at.tzinfo is None:
+            end_at = end_at.replace(tzinfo=timezone.utc)
+        delta = end_at - now
         return max(0, delta.days)
     
     def get_module_entitlement(self, module: str) -> Optional['Entitlement']:

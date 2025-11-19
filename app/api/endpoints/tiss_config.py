@@ -54,6 +54,12 @@ async def upsert_tiss_config(
     db: AsyncSession = Depends(get_async_session),
 ):
     try:
+        if not current_user.clinic_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User is not associated with a clinic"
+            )
+        
         result = await db.execute(select(TissConfig).where(TissConfig.clinic_id == current_user.clinic_id))
         cfg = result.scalar_one_or_none()
         if not cfg:
@@ -67,19 +73,46 @@ async def upsert_tiss_config(
             db.add(cfg)
         else:
             if "prestador" in payload:
-                cfg.prestador = payload["prestador"]
+                cfg.prestador = payload.get("prestador", {})
             if "operadora" in payload:
-                cfg.operadora = payload["operadora"]
+                cfg.operadora = payload.get("operadora", {})
             if "defaults" in payload:
-                cfg.defaults = payload["defaults"]
+                cfg.defaults = payload.get("defaults", {})
             if "tiss" in payload:
-                cfg.tiss = payload["tiss"]
+                cfg.tiss = payload.get("tiss", {})
 
         await db.commit()
+        await db.refresh(cfg)
         return {"message": "TISS config saved"}
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except (ProgrammingError, SQLAlchemyError) as e:
-        # Surface a friendly error if table is missing; frontend can guide to run migrations
-        raise HTTPException(status_code=500, detail="TISS config storage not initialized. Run migrations.")
+        await db.rollback()
+        error_msg = str(e).lower()
+        # Check if table doesn't exist
+        if "does not exist" in error_msg or "undefinedtable" in error_msg or "relation" in error_msg:
+            raise HTTPException(
+                status_code=500, 
+                detail="TISS config storage not initialized. Run migrations: alembic upgrade head"
+            )
+        # For other database errors, return a generic message
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Database error saving TISS config: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error saving TISS config: {str(e)}"
+        )
+    except Exception as e:
+        await db.rollback()
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Unexpected error saving TISS config: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error saving TISS config: {str(e)}"
+        )
 
 
 @router.get("/admin/{clinic_id}")
@@ -117,6 +150,16 @@ async def upsert_tiss_config_for_clinic(
     Update TISS config for a specific clinic (SuperAdmin only)
     """
     try:
+        # Validate clinic exists
+        from app.models import Clinic
+        clinic_result = await db.execute(select(Clinic).where(Clinic.id == clinic_id))
+        clinic = clinic_result.scalar_one_or_none()
+        if not clinic:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Clinic with id {clinic_id} not found"
+            )
+        
         result = await db.execute(select(TissConfig).where(TissConfig.clinic_id == clinic_id))
         cfg = result.scalar_one_or_none()
         if not cfg:
@@ -130,17 +173,45 @@ async def upsert_tiss_config_for_clinic(
             db.add(cfg)
         else:
             if "prestador" in payload:
-                cfg.prestador = payload["prestador"]
+                cfg.prestador = payload.get("prestador", {})
             if "operadora" in payload:
-                cfg.operadora = payload["operadora"]
+                cfg.operadora = payload.get("operadora", {})
             if "defaults" in payload:
-                cfg.defaults = payload["defaults"]
+                cfg.defaults = payload.get("defaults", {})
             if "tiss" in payload:
-                cfg.tiss = payload["tiss"]
+                cfg.tiss = payload.get("tiss", {})
 
         await db.commit()
+        await db.refresh(cfg)
         return {"message": "TISS config saved"}
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except (ProgrammingError, SQLAlchemyError) as e:
-        raise HTTPException(status_code=500, detail="TISS config storage not initialized. Run migrations.")
+        await db.rollback()
+        error_msg = str(e).lower()
+        # Check if table doesn't exist
+        if "does not exist" in error_msg or "undefinedtable" in error_msg or "relation" in error_msg:
+            raise HTTPException(
+                status_code=500, 
+                detail="TISS config storage not initialized. Run migrations: alembic upgrade head"
+            )
+        # For other database errors, return a generic message
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Database error saving TISS config: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error saving TISS config: {str(e)}"
+        )
+    except Exception as e:
+        await db.rollback()
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Unexpected error saving TISS config: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error saving TISS config: {str(e)}"
+        )
 
 

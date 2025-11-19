@@ -29,7 +29,7 @@ class TissTemplate(BaseModel):
     # Basic Information
     name = Column(String(200), nullable=False, index=True)
     description = Column(Text, nullable=True)
-    category = Column(SQLEnum(TissTemplateCategory), nullable=False, default=TissTemplateCategory.CUSTOM)
+    category = Column(String(50), nullable=False, default=TissTemplateCategory.CUSTOM.value)
     
     # Template Content
     xml_template = Column(Text, nullable=False)  # XML template with variables like {{VARIABLE_NAME}}

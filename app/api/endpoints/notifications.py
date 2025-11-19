@@ -101,7 +101,9 @@ async def list_notifications(
         # Continue without message notifications
 
     # Patients: upcoming appointments within next 7 days
-    if current_user.role == UserRole.PATIENT:
+    # Check role as string to handle both enum and string values
+    is_patient = str(current_user.role).lower() == "patient" if current_user.role else False
+    if is_patient:
         # Use patient from earlier query if available, otherwise query again
         if patient is None:
             patient_query = select(Patient).filter(
@@ -154,22 +156,22 @@ async def list_notifications(
         return {"data": notifications}
 
     # Staff: unresolved stock alerts
-    alerts_stmt = (
-        select(StockAlert)
-        .where(
-            and_(
-                StockAlert.clinic_id == current_user.clinic_id,
-                StockAlert.is_resolved == False,  # noqa: E712
+    try:
+        alerts_stmt = (
+            select(StockAlert)
+            .where(
+                and_(
+                    StockAlert.clinic_id == current_user.clinic_id,
+                    StockAlert.is_resolved == False,  # noqa: E712
+                )
             )
+            .order_by(desc(StockAlert.created_at))
+            .limit(100)
         )
-        .order_by(desc(StockAlert.created_at))
-        .limit(100)
-    )
-    alerts = (await db.execute(alerts_stmt)).scalars().all()
-    for alert in alerts:
-        priority = "urgent" if getattr(alert, "severity", "").lower() in {"high", "critical"} else "high"
-        notifications.append(
-            {
+        alerts = (await db.execute(alerts_stmt)).scalars().all()
+        for alert in alerts:
+            priority = "urgent" if getattr(alert, "severity", "").lower() in {"high", "critical"} else "high"
+            notifications.append({
                 "id": f"stock:{alert.id}",
                 "kind": "stock",
                 "source_id": alert.id,
@@ -184,38 +186,51 @@ async def list_notifications(
                 "actionText": "Abrir estoque",
             }
         )
+    except Exception as e:
+        # Log error but don't fail the entire endpoint
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"Failed to load stock alerts: {str(e)}")
+        # Continue without stock alert notifications
 
     # Staff: upcoming appointments today (overview)
-    appt_stmt = (
-        select(Appointment)
-        .where(
-            and_(
-                Appointment.clinic_id == current_user.clinic_id,
-                Appointment.scheduled_datetime >= now.replace(hour=0, minute=0, second=0, microsecond=0),
-                Appointment.scheduled_datetime < (now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)),
+    try:
+        appt_stmt = (
+            select(Appointment)
+            .where(
+                and_(
+                    Appointment.clinic_id == current_user.clinic_id,
+                    Appointment.scheduled_datetime >= now.replace(hour=0, minute=0, second=0, microsecond=0),
+                    Appointment.scheduled_datetime < (now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)),
+                )
             )
+            .order_by(Appointment.scheduled_datetime)
+            .limit(50)
         )
-        .order_by(Appointment.scheduled_datetime)
-        .limit(50)
-    )
-    appts = (await db.execute(appt_stmt)).scalars().all()
-    for a in appts:
-        notifications.append(
-            {
-                "id": f"appt:{a.id}",
-                "kind": "appointment",
-                "source_id": a.id,
-                "title": "Consulta de hoje",
-                "message": "Consulta agendada para hoje.",
-                "type": "info",
-                "priority": "medium",
-                "read": False,
-                "timestamp": (a.scheduled_datetime or now).isoformat(),
-                "source": "Agendamentos",
-                "actionUrl": "/secretaria/agendamentos",
-                "actionText": "Ver agenda",
-            }
-        )
+        appts = (await db.execute(appt_stmt)).scalars().all()
+        for a in appts:
+            notifications.append(
+                {
+                    "id": f"appt:{a.id}",
+                    "kind": "appointment",
+                    "source_id": a.id,
+                    "title": "Consulta de hoje",
+                    "message": "Consulta agendada para hoje.",
+                    "type": "info",
+                    "priority": "medium",
+                    "read": False,
+                    "timestamp": (a.scheduled_datetime or now).isoformat(),
+                    "source": "Agendamentos",
+                    "actionUrl": "/secretaria/agendamentos",
+                    "actionText": "Ver agenda",
+                }
+            )
+    except Exception as e:
+        # Log error but don't fail the entire endpoint
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"Failed to load appointments: {str(e)}")
+        # Continue without appointment notifications
 
     return {"data": notifications}
 

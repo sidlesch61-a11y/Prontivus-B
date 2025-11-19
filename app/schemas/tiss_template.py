@@ -3,8 +3,8 @@ TISS Template Pydantic schemas
 """
 
 from datetime import datetime
-from typing import Optional, List
-from pydantic import BaseModel, Field
+from typing import Optional, List, Union
+from pydantic import BaseModel, Field, field_validator
 from app.models.tiss_template import TissTemplateCategory
 
 
@@ -16,6 +16,22 @@ class TissTemplateBase(BaseModel):
     xml_template: str = Field(..., description="XML template with variables like {{VARIABLE_NAME}}")
     is_default: bool = Field(default=False, description="Whether this is a default template")
     is_active: bool = Field(default=True, description="Whether the template is active")
+    
+    @field_validator('category', mode='before')
+    @classmethod
+    def normalize_category(cls, v):
+        """Normalize category to enum value (lowercase)"""
+        if isinstance(v, str):
+            v = v.lower()
+            try:
+                return TissTemplateCategory(v)
+            except ValueError:
+                # If invalid, default to custom
+                return TissTemplateCategory.CUSTOM
+        return v
+    
+    class Config:
+        use_enum_values = True  # Use enum values instead of enum objects when serializing
 
 
 class TissTemplateCreate(TissTemplateBase):

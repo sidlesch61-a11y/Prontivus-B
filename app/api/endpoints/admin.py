@@ -10,9 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_async_session
 from app.models import (
-    Clinic, User, UserRole, Patient, Appointment,
+    Clinic, User, UserRole as UserRoleEnum, Patient, Appointment,
     Invoice, Payment, ServiceItem, Product, StockMovement, Procedure
 )
+from app.models.menu import UserRole
 from app.models.clinical import ClinicalRecord, Prescription, Diagnosis
 from app.schemas.clinic import (
     ClinicCreate, ClinicUpdate, ClinicResponse, ClinicListResponse,
@@ -32,7 +33,7 @@ from app.schemas.system_log import (
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
 # Require admin role for all endpoints
-require_admin = RoleChecker([UserRole.ADMIN])
+require_admin = RoleChecker([UserRoleEnum.ADMIN])
 
 
 @router.get("/clinics/stats", response_model=ClinicStatsResponse)
@@ -351,7 +352,7 @@ async def update_my_clinic(
     Available to admin users (AdminClinica role) or super admin
     """
     # Check if user has permission (admin role or super admin)
-    if current_user.role not in [UserRole.ADMIN] and current_user.role_id != 2:  # AdminClinica role_id is 2
+    if current_user.role not in [UserRoleEnum.ADMIN] and current_user.role_id != 2:  # AdminClinica role_id is 2
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only clinic administrators can update clinic information"
@@ -398,7 +399,7 @@ async def update_my_clinic(
     # Update clinic (only allow updating basic info, not license info for clinic admins)
     update_data = clinic_data.model_dump(exclude_unset=True)
     # Remove license-related fields for clinic admins (only super admin can update these)
-    if current_user.role != UserRole.ADMIN or current_user.role_id != 1:  # Not super admin
+    if current_user.role != UserRoleEnum.ADMIN or current_user.role_id != 1:  # Not super admin
         update_data.pop("license_key", None)
         update_data.pop("expiration_date", None)
         update_data.pop("max_users", None)
@@ -619,7 +620,7 @@ async def get_clinic(
         return ClinicResponse.model_construct(**response_dict)
 
 
-@router.post("/clinics", response_model=ClinicResponse)
+@router.post("/clinics")  # Removed response_model to allow admin_user field
 async def create_clinic(
     clinic_data: ClinicCreate,
     current_user: User = Depends(require_admin),
@@ -720,7 +721,7 @@ async def create_clinic(
         hashed_password=hash_password(default_password),
         first_name="Administrador",
         last_name=clinic_data.name,
-        role=UserRole.ADMIN,  # Legacy enum
+        role=UserRoleEnum.ADMIN,  # Legacy enum
         role_id=admin_role.id,  # AdminClinica role_id = 2
         clinic_id=clinic.id,
         is_active=True,
@@ -781,19 +782,18 @@ async def create_clinic(
         "active_modules": clinic.active_modules or [],
         "created_at": to_date(getattr(clinic, "created_at", None)) or date.today(),
         "updated_at": to_date(getattr(clinic, "updated_at", None)),
+        # Add admin user info to response
+        "admin_user": {
+            "username": username,
+            "email": admin_email,
+            "password": default_password,  # Include password so SuperAdmin can share it
+            "role": "AdminClinica"
+        }
     }
     
-    # Add admin user info to response (will be accessible but not in schema)
-    clinic_response = ClinicResponse.model_construct(**response_dict)
-    # Store admin user info as attribute (can be accessed but won't break schema validation)
-    clinic_response.admin_user = {
-        "username": username,
-        "email": admin_email,
-        "password": default_password,  # Include password so SuperAdmin can share it
-        "role": "AdminClinica"
-    }
-    
-    return clinic_response
+    # Return as dict to bypass Pydantic validation for admin_user field
+    # FastAPI will serialize it correctly
+    return response_dict
 
 
 @router.put("/clinics/{clinic_id}", response_model=ClinicResponse)
@@ -898,7 +898,9 @@ async def delete_clinic(
     db: AsyncSession = Depends(get_async_session)
 ):
     """
-    Delete a clinic (soft delete by setting is_active=False)
+    Delete a clinic from the database (hard delete).
+    This will also delete all related records (users, patients, appointments, etc.)
+    due to cascade relationships.
     """
     query = select(Clinic).filter(Clinic.id == clinic_id)
     result = await db.execute(query)
@@ -910,11 +912,268 @@ async def delete_clinic(
             detail="Clinic not found"
         )
     
-    # Soft delete
-    clinic.is_active = False
-    await db.commit()
+    # Store clinic info for logging before deletion
+    clinic_name = clinic.name
+    clinic_id_for_log = clinic.id
+    deleted_by = current_user.username if current_user else "system"
     
-    return {"message": "Clinic deactivated successfully"}
+    # Use SQL directly to delete all related records, then delete clinic
+    # This avoids ORM relationship loading issues and transaction problems
+    from sqlalchemy import text
+    
+    try:
+        # Delete related records using SQL to avoid ORM issues
+        # Order matters: delete child records before parent records
+        
+        # Delete all related records using SQL to avoid ORM relationship issues
+        # This approach is more reliable and avoids transaction abort problems
+        
+        # Helper function to execute DELETE with error handling
+        async def safe_delete(query: str, params: dict, table_name: str = "", optional: bool = False):
+            """Execute DELETE query, handling errors gracefully"""
+            try:
+                await db.execute(text(query), params)
+            except Exception as e:
+                error_msg = str(e).lower()
+                # If table doesn't exist and it's optional, just continue
+                if optional and ("does not exist" in error_msg or "undefinedtable" in error_msg):
+                    return  # Table doesn't exist, skip
+                # If transaction is aborted, rollback and re-raise immediately
+                if "aborted" in error_msg or "in failed sql transaction" in error_msg:
+                    await db.rollback()
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Erro ao deletar {table_name}: Transação abortada. Um comando anterior falhou. Erro: {str(e)}"
+                    )
+                # For other errors, rollback and re-raise
+                await db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Erro ao deletar {table_name}: {str(e)}"
+                )
+        
+        # Delete in correct order to respect foreign key constraints
+        # 1. Delete clinical records, prescriptions, diagnoses first (they reference appointments)
+        # These are optional tables that might not exist, so we handle errors gracefully
+        # Use a helper function that checks for transaction abort and handles it properly
+        async def safe_delete_optional(query: str, params: dict, table_name: str):
+            """Delete from optional table, handling errors gracefully - skip if table doesn't exist"""
+            try:
+                await db.execute(text(query), params)
+            except Exception as e:
+                error_msg = str(e).lower()
+                # If table doesn't exist, PostgreSQL aborts the transaction
+                # We need to rollback and restart the transaction
+                if "does not exist" in error_msg or "undefinedtable" in error_msg:
+                    # Rollback to clear the aborted transaction
+                    await db.rollback()
+                    # Restart transaction by executing a simple query
+                    await db.execute(text("SELECT 1"))
+                    return  # Table doesn't exist, skip
+                # If transaction is aborted for other reasons, rollback and re-raise
+                if "aborted" in error_msg or "in failed sql transaction" in error_msg:
+                    await db.rollback()
+                    # Restart transaction
+                    await db.execute(text("SELECT 1"))
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Erro ao deletar {table_name}: Transação abortada. Erro: {str(e)}"
+                    )
+                # For any other error, re-raise to be handled by outer exception handler
+                raise
+        
+        # PHASE 1: Delete all optional tables first (these may cause ROLLBACK if they don't exist)
+        # This ensures that if there's a ROLLBACK, we haven't lost any critical operations yet
+        
+        # Delete records that reference appointments (must be deleted before appointments)
+        # These are optional tables that might not exist
+        await safe_delete_optional("""
+            DELETE FROM clinical_records 
+            WHERE appointment_id IN (SELECT id FROM appointments WHERE clinic_id = :clinic_id)
+        """, {"clinic_id": clinic_id}, "clinical_records")
+        
+        await safe_delete_optional("""
+            DELETE FROM prescriptions 
+            WHERE appointment_id IN (SELECT id FROM appointments WHERE clinic_id = :clinic_id)
+        """, {"clinic_id": clinic_id}, "prescriptions")
+        
+        await safe_delete_optional("""
+            DELETE FROM diagnoses 
+            WHERE appointment_id IN (SELECT id FROM appointments WHERE clinic_id = :clinic_id)
+        """, {"clinic_id": clinic_id}, "diagnoses")
+        
+        await safe_delete_optional("""
+            DELETE FROM patient_calls 
+            WHERE appointment_id IN (SELECT id FROM appointments WHERE clinic_id = :clinic_id)
+        """, {"clinic_id": clinic_id}, "patient_calls")
+        
+        await safe_delete_optional("""
+            DELETE FROM file_uploads 
+            WHERE appointment_id IN (SELECT id FROM appointments WHERE clinic_id = :clinic_id)
+        """, {"clinic_id": clinic_id}, "file_uploads")
+        
+        await safe_delete_optional("""
+            DELETE FROM voice_sessions 
+            WHERE appointment_id IN (SELECT id FROM appointments WHERE clinic_id = :clinic_id)
+        """, {"clinic_id": clinic_id}, "voice_sessions (by appointment)")
+        
+        # Delete stock movements (optional - table might not exist)
+        await safe_delete_optional("DELETE FROM stock_movements WHERE clinic_id = :clinic_id", {"clinic_id": clinic_id}, "stock_movements")
+        
+        # Delete procedures (optional - table might not exist)
+        await safe_delete_optional("DELETE FROM procedures WHERE clinic_id = :clinic_id", {"clinic_id": clinic_id}, "procedures")
+        
+        # Delete insurance plans (optional - table might not exist)
+        await safe_delete_optional("DELETE FROM insurance_plans WHERE clinic_id = :clinic_id", {"clinic_id": clinic_id}, "insurance_plans")
+        
+        # Delete preauth requests (optional - table might not exist)
+        await safe_delete_optional("DELETE FROM preauth_requests WHERE clinic_id = :clinic_id", {"clinic_id": clinic_id}, "preauth_requests")
+        
+        # Delete stock alerts (optional - table might not exist)
+        await safe_delete_optional("DELETE FROM stock_alerts WHERE clinic_id = :clinic_id", {"clinic_id": clinic_id}, "stock_alerts")
+        
+        # Delete message threads (optional - table might not exist)
+        await safe_delete_optional("DELETE FROM message_threads WHERE clinic_id = :clinic_id", {"clinic_id": clinic_id}, "message_threads")
+        
+        # Delete voice sessions by user_id (optional - table might not exist)
+        # Note: voice_sessions by appointment_id were already deleted above
+        await safe_delete_optional("""
+            DELETE FROM voice_sessions 
+            WHERE user_id IN (SELECT id FROM users WHERE clinic_id = :clinic_id)
+               AND appointment_id IS NULL
+        """, {"clinic_id": clinic_id}, "voice_sessions (by user)")
+        
+        # Delete user settings (optional - table might not exist)
+        await safe_delete_optional("""
+            DELETE FROM user_settings 
+            WHERE user_id IN (SELECT id FROM users WHERE clinic_id = :clinic_id)
+        """, {"clinic_id": clinic_id}, "user_settings")
+        
+        # PHASE 2: Delete critical tables (these must succeed)
+        # After all optional tables are handled, delete critical tables
+        # This ensures that if there was a ROLLBACK from optional tables, we still have a clean transaction
+        
+        # 1. First, clear appointment_id references in invoices (invoices reference appointments)
+        await safe_delete("""
+            UPDATE invoices 
+            SET appointment_id = NULL 
+            WHERE appointment_id IN (SELECT id FROM appointments WHERE clinic_id = :clinic_id)
+        """, {"clinic_id": clinic_id}, "invoices.appointment_id")
+        
+        # 2. Delete invoice_lines (must be deleted before invoices)
+        await safe_delete_optional("""
+            DELETE FROM invoice_lines 
+            WHERE invoice_id IN (SELECT id FROM invoices WHERE clinic_id = :clinic_id)
+        """, {"clinic_id": clinic_id}, "invoice_lines")
+        
+        # 3. Delete payments (may reference users and invoices)
+        # Must be deleted before invoices to avoid foreign key issues
+        await safe_delete("""
+            DELETE FROM payments 
+            WHERE invoice_id IN (SELECT id FROM invoices WHERE clinic_id = :clinic_id)
+               OR created_by IN (SELECT id FROM users WHERE clinic_id = :clinic_id)
+        """, {"clinic_id": clinic_id}, "payments")
+        
+        # 4. Delete invoices (must be deleted before appointments since invoices reference appointments)
+        # Note: We already cleared appointment_id references above, so this should be safe
+        try:
+            await db.execute(text("DELETE FROM invoices WHERE clinic_id = :clinic_id"), {"clinic_id": clinic_id})
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "foreign key" in error_msg or "constraint" in error_msg:
+                await db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Erro ao deletar invoices: {str(e)}"
+                )
+            raise
+        
+        # 5. Now we can safely delete appointments (they reference users and patients)
+        # All references to appointments have been cleared or deleted
+        try:
+            await db.execute(text("DELETE FROM appointments WHERE clinic_id = :clinic_id"), {"clinic_id": clinic_id})
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "foreign key" in error_msg or "constraint" in error_msg:
+                await db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Erro ao deletar appointments: {str(e)}"
+                )
+            raise
+        
+        # 6. Delete patients
+        await safe_delete("DELETE FROM patients WHERE clinic_id = :clinic_id", {"clinic_id": clinic_id}, "patients")
+        
+        # 7. Delete users (after appointments and payments that reference them)
+        await safe_delete("DELETE FROM users WHERE clinic_id = :clinic_id", {"clinic_id": clinic_id}, "users")
+        
+        # 8. Delete products
+        await safe_delete("DELETE FROM products WHERE clinic_id = :clinic_id", {"clinic_id": clinic_id}, "products")
+        
+        # 9. Delete service_items (they reference clinics)
+        await safe_delete_optional("DELETE FROM service_items WHERE clinic_id = :clinic_id", {"clinic_id": clinic_id}, "service_items")
+        
+        # Check for any remaining references to the clinic (e.g., licenses)
+        # Delete license relationship if exists
+        await safe_delete_optional("""
+            UPDATE clinics 
+            SET license_id = NULL 
+            WHERE id = :clinic_id
+        """, {"clinic_id": clinic_id}, "clinics.license_id")
+        
+        # Finally, delete the clinic itself
+        try:
+            await db.execute(text("DELETE FROM clinics WHERE id = :clinic_id"), {"clinic_id": clinic_id})
+            await db.commit()
+        except Exception as delete_error:
+            await db.rollback()
+            error_msg = str(delete_error)
+            # Log the full error for debugging
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to delete clinic {clinic_id}: {error_msg}")
+            
+            # Check for foreign key constraint errors
+            if "foreign key" in error_msg.lower() or "constraint" in error_msg.lower() or "violates foreign key" in error_msg.lower():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Não é possível excluir a clínica: existem registros relacionados que impedem a exclusão. Por favor, verifique se todos os registros relacionados foram deletados. Erro detalhado: {error_msg}"
+                )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Erro ao excluir clínica: {error_msg}"
+            )
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        await db.rollback()
+        error_msg = str(e)
+        # Log the full error for debugging
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Unexpected error deleting clinic {clinic_id}: {error_msg}", exc_info=True)
+        
+        # Check for foreign key constraint errors
+        if "foreign key" in error_msg.lower() or "constraint" in error_msg.lower() or "violates foreign key" in error_msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Não é possível excluir a clínica: existem registros relacionados que impedem a exclusão. Por favor, verifique se todos os registros relacionados foram deletados. Erro: {error_msg}"
+            )
+        # Check for missing table errors
+        if "does not exist" in error_msg.lower() or "undefinedtable" in error_msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Erro ao excluir clínica: Tabela não encontrada no banco de dados. Por favor, verifique as migrações do banco de dados. Erro: {error_msg}"
+            )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erro ao excluir clínica: {error_msg}"
+        )
+    
+    return {"message": "Clinic deleted successfully"}
 
 
 # ==================== System Logs ====================

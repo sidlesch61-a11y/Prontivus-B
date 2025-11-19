@@ -61,11 +61,32 @@ def _compute_instance_id(tenant_tax_id: str, admin_email: str, fingerprint: Opti
     return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
 
-def _ensure_superadmin(user: User):
-    if user.role.value.lower() != "admin" and getattr(user, "is_superadmin", False) is not True:
-        # Fallback: require role admin and username == 'superadmin' if no flag
-        if user.username.lower() != "superadmin":
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="SuperAdmin required")
+async def _ensure_superadmin(user: User, db: AsyncSession):
+    """Check if user is SuperAdmin by role_id or role_name"""
+    # Check by role_id (SuperAdmin role_id is 1)
+    if user.role_id == 1:
+        return True
+    
+    # Check by role_name if user_role relationship is loaded
+    if hasattr(user, 'user_role') and user.user_role:
+        if user.user_role.name == "SuperAdmin":
+            return True
+    
+    # Load user_role relationship if not already loaded
+    if user.role_id:
+        from app.models.menu import UserRole as UserRoleModel
+        role_query = await db.execute(
+            select(UserRoleModel).where(UserRoleModel.id == user.role_id)
+        )
+        role = role_query.scalar_one_or_none()
+        if role and role.name == "SuperAdmin":
+            return True
+    
+    # Fallback: require role admin and username == 'superadmin'
+    if user.role.value.lower() == "admin" and user.username.lower() == "superadmin":
+        return True
+    
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="SuperAdmin required")
 
 
 @router.post("", response_model=LicenseResponse, status_code=status.HTTP_201_CREATED)
@@ -74,13 +95,23 @@ async def create_license(body: LicenseCreate, db: AsyncSession = Depends(get_db)
     Create a new license (SuperAdmin only). Generates activation_key and digital signature.
     Initial status will be set to 'suspended' to represent inactive until activation.
     """
-    _ensure_superadmin(current_user)
+    await _ensure_superadmin(current_user, db)
 
     # Validate clinic exists
     clinic_q = await db.execute(select(Clinic).where(Clinic.id == body.tenant_id))
     clinic = clinic_q.scalar_one_or_none()
     if not clinic:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant clinic not found")
+
+    # Check if clinic already has a license
+    if clinic.license_id:
+        existing_license_q = await db.execute(select(License).where(License.id == clinic.license_id))
+        existing_license = existing_license_q.scalar_one_or_none()
+        if existing_license and existing_license.status != LicenseStatus.CANCELLED:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Clinic already has an active license. Please cancel the existing license first."
+            )
 
     # Build payload to sign
     payload = {
@@ -94,34 +125,72 @@ async def create_license(body: LicenseCreate, db: AsyncSession = Depends(get_db)
     }
     signature = _sign_payload(payload)
 
-    # Create license
-    license_obj = License(
-        tenant_id=clinic.id,
-        plan=payload["plan"],
-        modules=body.modules,
-        users_limit=body.users_limit,
-        units_limit=body.units_limit,
-        start_at=body.start_at,
-        end_at=body.end_at,
-        status=LicenseStatus.SUSPENDED,
-        signature=signature,
-    )
+    try:
+        # Create license
+        license_obj = License(
+            tenant_id=clinic.id,
+            plan=payload["plan"],
+            modules=body.modules,
+            users_limit=body.users_limit,
+            units_limit=body.units_limit,
+            start_at=body.start_at,
+            end_at=body.end_at,
+            status=LicenseStatus.SUSPENDED,
+            signature=signature,
+        )
 
-    db.add(license_obj)
-    await db.flush()
-    await db.refresh(license_obj)
+        db.add(license_obj)
+        await db.flush()  # Flush to get license.id and activation_key without committing
+        await db.refresh(license_obj)
+        
+        # Note: get_db dependency will commit automatically at the end of the function
+        # But we need to ensure the license is persisted before returning
+        # The flush() above ensures the license gets an ID, and the commit will happen
+        # automatically when the function returns successfully
 
-    security_logger.log_security_event(
-        event_type="license_created",
-        user_id=current_user.id,
-        username=current_user.username,
-        ip_address=None,
-        description=f"License created for tenant {clinic.id}",
-        severity="INFO",
-        additional_data={"license_id": str(license_obj.id)}
-    )
+        # Log the creation (non-blocking)
+        try:
+            security_logger.log_security_event(
+                event_type="license_created",
+                user_id=current_user.id,
+                username=current_user.username,
+                ip_address=None,
+                description=f"License created for tenant {clinic.id}",
+                severity="INFO",
+                additional_data={"license_id": str(license_obj.id)}
+            )
+        except Exception as log_error:
+            # Don't fail license creation if logging fails
+            print(f"Warning: Failed to log license creation: {log_error}")
 
-    return LicenseResponse.model_validate(license_obj)
+        return LicenseResponse.model_validate(license_obj)
+    except Exception as e:
+        await db.rollback()
+        error_msg = str(e)
+        
+        # Check for unique constraint violations
+        if "unique" in error_msg.lower() or "duplicate" in error_msg.lower() or "violates unique constraint" in error_msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"License creation failed: Duplicate entry. {error_msg}"
+            )
+        
+        # Check for foreign key constraint errors
+        if "foreign key" in error_msg.lower() or "constraint" in error_msg.lower() or "violates foreign key" in error_msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"License creation failed: Invalid clinic reference. {error_msg}"
+            )
+        
+        # Log the error for debugging
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error creating license: {error_msg}", exc_info=True)
+        
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erro ao criar licença: {error_msg}"
+        )
 
 
 class ActivationRequestPublic:
@@ -243,7 +312,7 @@ async def list_licenses(
     """
     List all licenses (SuperAdmin only)
     """
-    _ensure_superadmin(current_user)
+    await _ensure_superadmin(current_user, db)
     
     licenses_q = await db.execute(
         select(License, Clinic)
@@ -363,7 +432,7 @@ async def get_license(
     """
     Get a specific license by ID (SuperAdmin only)
     """
-    _ensure_superadmin(current_user)
+    await _ensure_superadmin(current_user, db)
     
     license_q = await db.execute(select(License).where(License.id == license_id))
     license_obj = license_q.scalar_one_or_none()
@@ -384,7 +453,7 @@ async def update_license(
     """
     Update a license (SuperAdmin only)
     """
-    _ensure_superadmin(current_user)
+    await _ensure_superadmin(current_user, db)
     
     license_q = await db.execute(select(License).where(License.id == license_id))
     license_obj = license_q.scalar_one_or_none()
@@ -425,7 +494,7 @@ async def delete_license(
     """
     Delete a license (SuperAdmin only) - sets status to CANCELLED
     """
-    _ensure_superadmin(current_user)
+    await _ensure_superadmin(current_user, db)
     
     license_q = await db.execute(select(License).where(License.id == license_id))
     license_obj = license_q.scalar_one_or_none()
