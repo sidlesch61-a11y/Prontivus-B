@@ -150,6 +150,7 @@ class UserUpdateRequest(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     role: Optional[UserRole] = None
+    password: Optional[str] = None  # Optional password field
     is_active: Optional[bool] = None
     is_verified: Optional[bool] = None
 
@@ -234,6 +235,11 @@ async def update_user(
         user.last_name = payload.last_name
     if payload.role is not None:
         user.role = payload.role
+    if payload.password is not None:
+        # Only update password if provided
+        if len(payload.password) < 8:
+            raise HTTPException(status_code=400, detail="Password must be at least 8 characters long")
+        user.hashed_password = hash_password(payload.password)
     if payload.is_active is not None:
         user.is_active = payload.is_active
     if payload.is_verified is not None:

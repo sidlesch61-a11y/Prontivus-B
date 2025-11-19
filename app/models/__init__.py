@@ -327,6 +327,7 @@ from app.models.payment_method_config import PaymentMethodConfig
 from app.models.report_config import ReportConfig
 from app.models.task import Task, TaskPriority
 from app.models.support import SupportTicket, HelpArticle, TicketStatus, TicketPriority
+from app.models.password_reset import PasswordResetToken
 
 # Export all models
 __all__ = [
@@ -401,5 +402,6 @@ __all__ = [
     "HelpArticle",
     "TicketStatus",
     "TicketPriority",
+    "PasswordResetToken",
 ]
 

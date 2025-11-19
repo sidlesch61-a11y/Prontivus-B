@@ -14,7 +14,8 @@ class MessageBase(BaseModel):
 
 
 class MessageCreate(MessageBase):
-    thread_id: int
+    # thread_id comes from the URL path, not the request body
+    pass
 
 
 class MessageResponse(MessageBase):
@@ -22,7 +23,7 @@ class MessageResponse(MessageBase):
     thread_id: int
     sender_id: int
     sender_type: str
-    status: MessageStatus
+    status: str  # Changed from MessageStatus to str since we're storing as VARCHAR
     created_at: datetime
     read_at: Optional[datetime] = None
     

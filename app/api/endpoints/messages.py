@@ -84,7 +84,7 @@ async def list_threads(
                 and_(
                     Message.thread_id == thread.id,
                     Message.sender_type != "patient",
-                    Message.status != MessageStatus.READ
+                    Message.status != MessageStatus.READ.value
                 )
             )
         else:
@@ -92,7 +92,7 @@ async def list_threads(
                 and_(
                     Message.thread_id == thread.id,
                     Message.sender_type == "patient",
-                    Message.status != MessageStatus.READ
+                    Message.status != MessageStatus.READ.value
                 )
             )
         unread_result = await db.execute(unread_query)
@@ -186,7 +186,7 @@ async def get_thread(
             and_(
                 Message.thread_id == thread.id,
                 Message.sender_type != "patient",
-                Message.status != MessageStatus.READ
+                Message.status != MessageStatus.READ.value
             )
         )
     else:
@@ -194,7 +194,7 @@ async def get_thread(
             and_(
                 Message.thread_id == thread.id,
                 Message.sender_type == "patient",
-                Message.status != MessageStatus.READ
+                Message.status != MessageStatus.READ.value
             )
         )
     unread_result = await db.execute(unread_query)
@@ -231,9 +231,9 @@ async def get_thread(
                 and_(
                     Message.thread_id == thread.id,
                     Message.sender_type != "patient",
-                    Message.status != MessageStatus.READ
+                    Message.status != MessageStatus.READ.value
                 )
-            ).values(status=MessageStatus.READ, read_at=datetime.datetime.now())
+            ).values(status=MessageStatus.READ.value, read_at=datetime.datetime.now())
         )
     else:
         # Mark patient messages as read
@@ -242,9 +242,9 @@ async def get_thread(
                 and_(
                     Message.thread_id == thread.id,
                     Message.sender_type == "patient",
-                    Message.status != MessageStatus.READ
+                    Message.status != MessageStatus.READ.value
                 )
-            ).values(status=MessageStatus.READ, read_at=datetime.datetime.now())
+            ).values(status=MessageStatus.READ.value, read_at=datetime.datetime.now())
         )
     await db.commit()
     
@@ -262,7 +262,21 @@ async def get_thread(
         last_message_at=last_message.created_at if last_message else None,
         last_message=last_message.content[:100] if last_message else None,
         unread_count=unread_count,
-        messages=[MessageResponse.model_validate(msg) for msg in sorted(thread.messages, key=lambda m: m.created_at)],
+        messages=[
+            MessageResponse(
+                id=msg.id,
+                thread_id=msg.thread_id,
+                sender_id=msg.sender_id,
+                sender_type=msg.sender_type,
+                content=msg.content,
+                status=str(msg.status) if msg.status else "sent",  # Ensure status is always a string
+                created_at=msg.created_at,
+                read_at=msg.read_at,
+                attachments=msg.attachments,
+                medical_context=msg.medical_context,
+            )
+            for msg in sorted(thread.messages, key=lambda m: m.created_at)
+        ],
     )
 
 
@@ -424,7 +438,7 @@ async def send_message(
         content=message_in.content or "",  # Allow empty content if attachments exist
         attachments=message_in.attachments,
         medical_context=message_in.medical_context,
-        status=MessageStatus.SENT,
+        status=MessageStatus.SENT.value,
     )
     db.add(message)
     
@@ -434,7 +448,19 @@ async def send_message(
     await db.commit()
     await db.refresh(message)
     
-    return MessageResponse.model_validate(message)
+    # Ensure status is always a string
+    return MessageResponse(
+        id=message.id,
+        thread_id=message.thread_id,
+        sender_id=message.sender_id,
+        sender_type=message.sender_type,
+        content=message.content,
+        status=str(message.status) if message.status else "sent",
+        created_at=message.created_at,
+        read_at=message.read_at,
+        attachments=message.attachments,
+        medical_context=message.medical_context,
+    )
 
 
 @router.delete("/threads/{thread_id}", status_code=status.HTTP_204_NO_CONTENT)

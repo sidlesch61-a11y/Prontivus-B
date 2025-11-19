@@ -58,7 +58,7 @@ async def list_notifications(
                     MessageThread.patient_id == patient.id,
                     MessageThread.clinic_id == current_user.clinic_id,
                     Message.sender_type != "patient",
-                    Message.status != MessageStatus.READ
+                    Message.status != MessageStatus.READ.value
                 )
             )
         else:
@@ -70,7 +70,7 @@ async def list_notifications(
                     MessageThread.provider_id == current_user.id,
                     MessageThread.clinic_id == current_user.clinic_id,
                     Message.sender_type == "patient",
-                    Message.status != MessageStatus.READ
+                    Message.status != MessageStatus.READ.value
                 )
             )
         

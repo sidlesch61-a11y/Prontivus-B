@@ -285,7 +285,7 @@ async def get_patient_dashboard(
                 MessageThread.patient_id == patient.id,
                 MessageThread.clinic_id == current_user.clinic_id,
                 Message.sender_type != "patient",
-                Message.status != MessageStatus.READ
+                Message.status != MessageStatus.READ.value
             )
         )
         messages_result = await db.execute(messages_query)

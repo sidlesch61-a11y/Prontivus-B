@@ -85,6 +85,25 @@ class ChangePasswordRequest(BaseModel):
     new_password: str = Field(..., min_length=6, description="New password")
 
 
+class ForgotPasswordRequest(BaseModel):
+    """Forgot password request schema"""
+    email: EmailStr = Field(..., description="User email address")
+    
+    @validator('email')
+    def validate_email_field(cls, v):
+        return validate_email(str(v))
+
+
+class ResetPasswordRequest(BaseModel):
+    """Reset password request schema"""
+    token: str = Field(..., description="Password reset token")
+    new_password: str = Field(..., min_length=8, max_length=100, description="New password")
+    
+    @validator('new_password')
+    def validate_password(cls, v):
+        return validate_password_strength(v)
+
+
 # ==================== Response Schemas ====================
 
 class TokenResponse(BaseModel):

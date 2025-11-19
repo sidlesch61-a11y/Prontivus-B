@@ -67,7 +67,7 @@ class Message(Base):
     
     # Message content
     content = Column(Text, nullable=False)
-    status = Column(SQLEnum(MessageStatus), default=MessageStatus.SENT, nullable=False)
+    status = Column(SQLEnum(MessageStatus, native_enum=False), default=MessageStatus.SENT.value, nullable=False)
     
     # Attachments and metadata
     attachments = Column(JSON, nullable=True)  # Array of attachment objects: {name, type, url, size}

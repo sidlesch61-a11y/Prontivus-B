@@ -389,7 +389,7 @@ async def change_password(
 ):
     """
     Change user password
-    Requires current password and new password
+    All password fields are required if any field is provided
     """
     from app.core.auth import verify_password, hash_password
     
@@ -397,10 +397,18 @@ async def change_password(
     new_password = password_data.get("newPassword")
     confirm_password = password_data.get("confirmPassword")
     
+    # Check if user is trying to change password (at least one field is provided)
+    is_changing_password = bool(current_password or new_password or confirm_password)
+    
+    if not is_changing_password:
+        # No password change attempted, return success
+        return {"message": "No password change requested"}
+    
+    # If any field is provided, all fields are required
     if not current_password or not new_password or not confirm_password:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="All password fields are required"
+            detail="Todos os campos de senha são obrigatórios se você desejar alterar a senha"
         )
     
     if new_password != confirm_password:
