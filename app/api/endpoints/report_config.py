@@ -8,11 +8,13 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError, ProgrammingError
 from typing import Any, Dict
 
-from app.core.auth import get_current_user
-from app.middleware.permissions import require_admin
+from app.core.auth import get_current_user, RoleChecker
 from database import get_async_session
-from app.models import User
+from app.models import User, UserRole
 from app.models.report_config import ReportConfig
+
+# Require admin role for update operations
+require_admin = RoleChecker([UserRole.ADMIN])
 
 router = APIRouter(prefix="/report-config", tags=["Report Config"])
 

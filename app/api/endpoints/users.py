@@ -22,11 +22,13 @@ require_staff = RoleChecker([UserRole.ADMIN, UserRole.SECRETARY, UserRole.DOCTOR
 
 async def is_super_admin(user: User, db: AsyncSession) -> bool:
     """Check if user is SuperAdmin by role_id or role_name"""
+    # First check by role_id (most efficient)
     if user.role_id == 1:  # SuperAdmin role_id is 1
         return True
     
-    # Load user_role relationship if not already loaded
-    if user.user_role is None and user.role_id:
+    # If role_id is not 1, check by querying the role name
+    # This avoids accessing lazy-loaded relationships
+    if user.role_id:
         from app.models.menu import UserRole as UserRoleModel
         role_query = await db.execute(
             select(UserRoleModel).where(UserRoleModel.id == user.role_id)
@@ -34,10 +36,6 @@ async def is_super_admin(user: User, db: AsyncSession) -> bool:
         role = role_query.scalar_one_or_none()
         if role and role.name == "SuperAdmin":
             return True
-    
-    # Check if already loaded
-    if hasattr(user, 'user_role') and user.user_role and user.user_role.name == "SuperAdmin":
-        return True
     
     return False
 

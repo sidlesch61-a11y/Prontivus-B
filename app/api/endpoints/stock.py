@@ -23,7 +23,7 @@ from app.schemas.stock import (
     StockAlertResponse, StockSummary, LowStockProduct, StockMovementSummary
 )
 
-router = APIRouter(tags=["Stock/Inventory"])
+router = APIRouter(prefix="/stock", tags=["Stock/Inventory"])
 
 # ==================== Products ====================
 
@@ -220,15 +220,20 @@ async def delete_product(
     db: AsyncSession = Depends(get_async_session)
 ):
     """
-    Delete a product (soft delete by setting is_active to False)
+    Delete a product (hard delete - removes from database)
     Requires staff role
     """
+    from sqlalchemy import text
+    from app.models.procedure import ProcedureProduct
+    
     # Check if user has permission
     if current_user.role not in [UserRole.ADMIN, UserRole.SECRETARY]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only staff can delete products"
         )
+    
+    # Verify product exists and belongs to user's clinic
     product_query = select(Product).filter(
         Product.id == product_id,
         Product.clinic_id == current_user.clinic_id
@@ -242,11 +247,41 @@ async def delete_product(
             detail="Product not found"
         )
     
-    # Soft delete
-    product.is_active = False
-    await db.commit()
+    try:
+        # Delete related records first (in order of dependencies)
+        # 1. Delete stock alerts
+        await db.execute(
+            text("DELETE FROM stock_alerts WHERE product_id = :product_id"),
+            {"product_id": product_id}
+        )
+        
+        # 2. Delete stock movements (cascade should handle this, but being explicit)
+        await db.execute(
+            text("DELETE FROM stock_movements WHERE product_id = :product_id"),
+            {"product_id": product_id}
+        )
+        
+        # 3. Delete procedure products
+        procedure_products_query = select(ProcedureProduct).filter(
+            ProcedureProduct.product_id == product_id
+        )
+        procedure_products_result = await db.execute(procedure_products_query)
+        procedure_products = procedure_products_result.scalars().all()
+        for pp in procedure_products:
+            await db.delete(pp)
+        
+        # 4. Finally, delete the product itself
+        await db.delete(product)
+        await db.commit()
+        
+        return {"message": "Product deleted successfully"}
     
-    return {"message": "Product deleted successfully"}
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error deleting product: {str(e)}"
+        )
 
 # ==================== Stock Movements ====================
 
