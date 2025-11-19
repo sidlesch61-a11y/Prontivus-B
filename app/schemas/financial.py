@@ -321,3 +321,53 @@ class AgingReport(BaseModel):
     summary: AccountsReceivableSummary
     items: List[AgingReportItem]
     generated_at: datetime
+
+
+# ==================== Expenses ====================
+
+class ExpenseBase(BaseModel):
+    """Base expense schema"""
+    description: str = Field(..., max_length=500, description="Expense description")
+    amount: Decimal = Field(..., decimal_places=2, description="Expense amount")
+    due_date: datetime = Field(..., description="Due date")
+    category: Optional[str] = Field(None, max_length=100, description="Expense category")
+    vendor: Optional[str] = Field(None, max_length=200, description="Vendor name")
+    notes: Optional[str] = Field(None, description="Additional notes")
+
+
+class ExpenseCreate(ExpenseBase):
+    """Schema for creating an expense"""
+    pass
+
+
+class ExpenseUpdate(BaseModel):
+    """Schema for updating an expense"""
+    description: Optional[str] = Field(None, max_length=500)
+    amount: Optional[Decimal] = Field(None, decimal_places=2)
+    due_date: Optional[datetime] = None
+    status: Optional[str] = None
+    category: Optional[str] = Field(None, max_length=100)
+    vendor: Optional[str] = Field(None, max_length=200)
+    paid_date: Optional[datetime] = None
+    payment_method: Optional[str] = Field(None, max_length=50)
+    payment_reference: Optional[str] = Field(None, max_length=100)
+    notes: Optional[str] = None
+
+
+class ExpenseResponse(ExpenseBase):
+    """Schema for expense responses"""
+    id: int
+    status: str
+    paid_date: Optional[datetime] = None
+    payment_method: Optional[str] = None
+    payment_reference: Optional[str] = None
+    days_overdue: Optional[int] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat() if v else None,
+            Decimal: lambda v: float(v) if v else 0.0
+        }

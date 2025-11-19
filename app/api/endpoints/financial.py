@@ -2,7 +2,7 @@
 Financial module API endpoints
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import List, Optional
 import enum
@@ -19,7 +19,7 @@ from database import get_async_session
 from app.models import (
     User, ServiceItem, Invoice, InvoiceLine, Patient, Appointment,
     ServiceCategory, InvoiceStatus, Procedure, Payment, PaymentMethod, PaymentStatus,
-    InsurancePlan, PreAuthRequest, PreAuthStatus
+    InsurancePlan, PreAuthRequest, PreAuthStatus, Expense, ExpenseStatus
 )
 from app.schemas.financial import (
     ServiceItemCreate, ServiceItemUpdate, ServiceItemResponse,
@@ -29,7 +29,8 @@ from app.schemas.financial import (
     PaymentCreate, PaymentUpdate, PaymentResponse,
     InsurancePlanCreate, InsurancePlanUpdate, InsurancePlanResponse,
     PreAuthRequestCreate, PreAuthRequestUpdate, PreAuthRequestResponse,
-    AccountsReceivableSummary, AgingReport
+    AccountsReceivableSummary, AgingReport,
+    ExpenseCreate, ExpenseUpdate, ExpenseResponse
 )
 from app.services.stock_consumption_service import consume_stock_for_procedure, check_stock_availability_for_procedure
 
@@ -1306,11 +1307,8 @@ async def get_doctor_accounts_payable(
     """
     Get accounts payable for the current doctor
     Returns expenses/bills for the doctor
-    
-    Note: Currently returns empty list as there's no expense model yet.
-    This endpoint is ready to be extended when an Expense model is created.
     """
-    from datetime import date as date_type
+    from datetime import date as date_type, timezone
     
     # Only allow doctors to access this endpoint
     if current_user.role != UserRole.DOCTOR:
@@ -1319,15 +1317,7 @@ async def get_doctor_accounts_payable(
             detail="This endpoint is only available for doctors"
         )
     
-    # TODO: When Expense model is created, implement the following:
-    # - Get expenses for the current doctor
-    # - Filter by status if provided
-    # - Calculate days overdue
-    # - Return list of expenses with details
-    
-    # For now, return empty list
-    # This structure can be used when Expense model is implemented:
-    """
+    # Get expenses for the current doctor
     expenses_query = select(Expense).filter(
         and_(
             Expense.doctor_id == current_user.id,
@@ -1337,34 +1327,259 @@ async def get_doctor_accounts_payable(
     
     if status:
         if status == "pending":
-            expenses_query = expenses_query.filter(Expense.status == ExpenseStatus.PENDING)
+            expenses_query = expenses_query.filter(Expense.status == ExpenseStatus.PENDING.value)
         elif status == "paid":
-            expenses_query = expenses_query.filter(Expense.status == ExpenseStatus.PAID)
+            expenses_query = expenses_query.filter(Expense.status == ExpenseStatus.PAID.value)
     
     result = await db.execute(expenses_query)
     expenses = result.scalars().all()
     
     payables = []
-    today = date_type.today()
+    today = datetime.now(timezone.utc).date()
     
     for expense in expenses:
-        due_date = expense.due_date.date() if hasattr(expense.due_date, 'date') else expense.due_date
-        days_overdue = (today - due_date).days if isinstance(due_date, date_type) else 0
+        # Convert due_date to date if it's a datetime
+        due_date = expense.due_date
+        if isinstance(due_date, datetime):
+            due_date = due_date.date()
+        elif hasattr(due_date, 'date'):
+            due_date = due_date.date()
+        
+        # Calculate days overdue
+        days_overdue = 0
+        if isinstance(due_date, date_type) and expense.status == ExpenseStatus.PENDING.value:
+            days_overdue = (today - due_date).days
+            if days_overdue < 0:
+                days_overdue = 0
         
         payables.append({
             "id": expense.id,
             "description": expense.description,
             "amount": float(expense.amount),
             "due_date": due_date.isoformat() if isinstance(due_date, date_type) else str(due_date),
-            "status": expense.status.value if hasattr(expense.status, 'value') else str(expense.status),
+            "status": expense.status,
             "days_overdue": days_overdue,
-            "category": expense.category if hasattr(expense, 'category') else None,
+            "category": expense.category,
+            "vendor": expense.vendor,
+            "paid_date": expense.paid_date.isoformat() if expense.paid_date else None,
+            "notes": expense.notes,
+            "created_at": expense.created_at.isoformat() if expense.created_at else None,
+            "updated_at": expense.updated_at.isoformat() if expense.updated_at else None,
         })
     
     return payables
+
+
+# ==================== Expense Endpoints ====================
+
+@router.post("/doctor/expenses", response_model=ExpenseResponse, status_code=status.HTTP_201_CREATED)
+async def create_expense(
+    expense_data: ExpenseCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
     """
+    Create a new expense for the current doctor
+    """
+    # Only allow doctors to access this endpoint
+    if current_user.role != UserRole.DOCTOR:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint is only available for doctors"
+        )
     
-    return []
+    # Create expense
+    new_expense = Expense(
+        description=expense_data.description,
+        amount=expense_data.amount,
+        due_date=expense_data.due_date,
+        category=expense_data.category,
+        vendor=expense_data.vendor,
+        notes=expense_data.notes,
+        doctor_id=current_user.id,
+        clinic_id=current_user.clinic_id,
+        status=ExpenseStatus.PENDING.value,
+    )
+    
+    db.add(new_expense)
+    await db.commit()
+    await db.refresh(new_expense)
+    
+    # Calculate days overdue
+    from datetime import date as date_type
+    today = datetime.now(timezone.utc).date()
+    due_date = new_expense.due_date
+    if isinstance(due_date, datetime):
+        due_date = due_date.date()
+    days_overdue = (today - due_date).days if isinstance(due_date, date_type) and new_expense.status == ExpenseStatus.PENDING.value else 0
+    if days_overdue < 0:
+        days_overdue = 0
+    
+    response = ExpenseResponse.model_validate(new_expense)
+    response.days_overdue = days_overdue
+    
+    return response
+
+
+@router.get("/doctor/expenses/{expense_id}", response_model=ExpenseResponse)
+async def get_expense(
+    expense_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get a specific expense by ID
+    """
+    # Only allow doctors to access this endpoint
+    if current_user.role != UserRole.DOCTOR:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint is only available for doctors"
+        )
+    
+    # Get expense
+    expense_query = select(Expense).filter(
+        and_(
+            Expense.id == expense_id,
+            Expense.doctor_id == current_user.id,
+            Expense.clinic_id == current_user.clinic_id
+        )
+    )
+    result = await db.execute(expense_query)
+    expense = result.scalar_one_or_none()
+    
+    if not expense:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Expense not found"
+        )
+    
+    # Calculate days overdue
+    from datetime import date as date_type
+    today = datetime.now(timezone.utc).date()
+    due_date = expense.due_date
+    if isinstance(due_date, datetime):
+        due_date = due_date.date()
+    days_overdue = (today - due_date).days if isinstance(due_date, date_type) and expense.status == ExpenseStatus.PENDING.value else 0
+    if days_overdue < 0:
+        days_overdue = 0
+    
+    response = ExpenseResponse.model_validate(expense)
+    response.days_overdue = days_overdue
+    
+    return response
+
+
+@router.put("/doctor/expenses/{expense_id}", response_model=ExpenseResponse)
+async def update_expense(
+    expense_id: int,
+    expense_data: ExpenseUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Update an expense
+    """
+    # Only allow doctors to access this endpoint
+    if current_user.role != UserRole.DOCTOR:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint is only available for doctors"
+        )
+    
+    # Get expense
+    expense_query = select(Expense).filter(
+        and_(
+            Expense.id == expense_id,
+            Expense.doctor_id == current_user.id,
+            Expense.clinic_id == current_user.clinic_id
+        )
+    )
+    result = await db.execute(expense_query)
+    expense = result.scalar_one_or_none()
+    
+    if not expense:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Expense not found"
+        )
+    
+    # Update fields
+    update_data = expense_data.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        if field == "status" and value:
+            # Validate status
+            if value not in [ExpenseStatus.PENDING.value, ExpenseStatus.PAID.value, ExpenseStatus.CANCELLED.value]:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid status: {value}"
+                )
+            setattr(expense, field, value)
+            # If marking as paid, set paid_date if not provided
+            if value == ExpenseStatus.PAID.value and not expense.paid_date:
+                expense.paid_date = datetime.now(timezone.utc)
+            # If marking as pending, clear paid_date
+            elif value == ExpenseStatus.PENDING.value:
+                expense.paid_date = None
+        else:
+            setattr(expense, field, value)
+    
+    await db.commit()
+    await db.refresh(expense)
+    
+    # Calculate days overdue
+    from datetime import date as date_type
+    today = datetime.now(timezone.utc).date()
+    due_date = expense.due_date
+    if isinstance(due_date, datetime):
+        due_date = due_date.date()
+    days_overdue = (today - due_date).days if isinstance(due_date, date_type) and expense.status == ExpenseStatus.PENDING.value else 0
+    if days_overdue < 0:
+        days_overdue = 0
+    
+    response = ExpenseResponse.model_validate(expense)
+    response.days_overdue = days_overdue
+    
+    return response
+
+
+@router.delete("/doctor/expenses/{expense_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_expense(
+    expense_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Delete an expense
+    """
+    # Only allow doctors to access this endpoint
+    if current_user.role != UserRole.DOCTOR:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint is only available for doctors"
+        )
+    
+    # Get expense
+    expense_query = select(Expense).filter(
+        and_(
+            Expense.id == expense_id,
+            Expense.doctor_id == current_user.id,
+            Expense.clinic_id == current_user.clinic_id
+        )
+    )
+    result = await db.execute(expense_query)
+    expense = result.scalar_one_or_none()
+    
+    if not expense:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Expense not found"
+        )
+    
+    await db.delete(expense)
+    await db.commit()
+    
+    return None
 
 
 @router.get("/accounts-receivable/summary", response_model=AccountsReceivableSummary)

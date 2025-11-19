@@ -286,7 +286,8 @@ from app.models.clinical import ClinicalRecord, Prescription, ExamRequest, Urgen
 from app.models.financial import (
     ServiceItem, Invoice, InvoiceLine, ServiceCategory, InvoiceStatus,
     Payment, PaymentMethod, PaymentStatus,
-    InsurancePlan, PreAuthRequest, PreAuthStatus
+    InsurancePlan, PreAuthRequest, PreAuthStatus,
+    Expense, ExpenseStatus
 )
 
 # Import stock models
@@ -353,6 +354,8 @@ __all__ = [
     "InsurancePlan",
     "PreAuthRequest",
     "PreAuthStatus",
+    "Expense",
+    "ExpenseStatus",
     "Product",
     "StockMovement",
     "StockAlert",

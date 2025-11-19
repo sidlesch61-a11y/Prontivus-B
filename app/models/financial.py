@@ -195,3 +195,35 @@ class PreAuthRequest(Base):
     insurance_plan = relationship("InsurancePlan", back_populates="preauth_requests")
     clinic = relationship("Clinic", back_populates="preauth_requests")
     creator = relationship("User", back_populates="created_preauth_requests")
+
+
+class ExpenseStatus(str, enum.Enum):
+    """Expense status enumeration"""
+    PENDING = "pending"
+    PAID = "paid"
+    CANCELLED = "cancelled"
+
+
+class Expense(Base):
+    """Expense/Accounts Payable model for doctors"""
+    __tablename__ = "expenses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    description = Column(String(500), nullable=False, index=True)
+    amount = Column(Numeric(10, 2), nullable=False)
+    due_date = Column(DateTime(timezone=True), nullable=False, index=True)
+    status = Column(SQLEnum(ExpenseStatus, native_enum=False), nullable=False, default=ExpenseStatus.PENDING.value, index=True)
+    category = Column(String(100), nullable=True, index=True)
+    vendor = Column(String(200), nullable=True)
+    paid_date = Column(DateTime(timezone=True), nullable=True)
+    payment_method = Column(String(50), nullable=True)
+    payment_reference = Column(String(100), nullable=True)
+    notes = Column(Text, nullable=True)
+    doctor_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    clinic_id = Column(Integer, ForeignKey("clinics.id"), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    doctor = relationship("User", foreign_keys=[doctor_id])
+    clinic = relationship("Clinic")
