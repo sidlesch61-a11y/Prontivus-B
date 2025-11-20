@@ -10,7 +10,7 @@ import os
 import json
 
 # Import API routers
-from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, notifications, user_settings, tiss_config, messages, menu, rbac_test, patient_dashboard, secretary_dashboard, doctor_dashboard, ai_config, fiscal_config, reports, payment_methods, report_config, support
+from app.api.endpoints import auth, patients, appointments, users, clinical, financial, tiss, tiss_batch, tiss_templates, stock, procedures, analytics, admin, licenses, voice, migration, files, patient_calling, websocket_calling, notifications, user_settings, tiss_config, messages, menu, rbac_test, patient_dashboard, secretary_dashboard, doctor_dashboard, ai_config, ai_usage, fiscal_config, reports, payment_methods, report_config, support
 from app.api.endpoints import icd10
 
 # Import security middleware
@@ -261,6 +261,7 @@ app.include_router(analytics.router, prefix=API_V1_PREFIX, tags=["Analytics"])
 app.include_router(admin.router, prefix=API_V1_PREFIX, tags=["Admin"])
 app.include_router(licenses.router, prefix=API_V1_PREFIX, tags=["Licenses"])
 app.include_router(ai_config.router, prefix=API_V1_PREFIX, tags=["AI Configuration"])
+app.include_router(ai_usage.router, prefix=API_V1_PREFIX, tags=["AI Usage"])
 app.include_router(fiscal_config.router, prefix=API_V1_PREFIX, tags=["Fiscal Configuration"])
 app.include_router(reports.router, prefix=API_V1_PREFIX, tags=["Reports"])
 app.include_router(icd10.router, prefix=API_V1_PREFIX, tags=["ICD-10"])

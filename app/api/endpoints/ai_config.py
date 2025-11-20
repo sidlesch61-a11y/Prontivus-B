@@ -17,6 +17,7 @@ from app.core.auth import get_current_user
 from app.models import User, AIConfig, License, Clinic
 from app.middleware.permissions import require_super_admin, require_admin
 from app.services.encryption_service import encrypt, decrypt
+from app.services.ai_service import create_ai_service, AIServiceError
 
 router = APIRouter(prefix="/ai-config", tags=["AI Configuration"])
 
@@ -385,19 +386,48 @@ async def test_ai_connection(
             detail="API key is required to test connection"
         )
     
-    # TODO: Implement actual connection test based on provider
-    # For now, simulate connection test
-    await asyncio.sleep(0.1)
+    # Get additional config if using saved config
+    base_url = None
+    max_tokens = 2000
+    temperature = 0.7
     
-    response_time_ms = int((time.time() - start_time) * 1000)
+    if not config:
+        ai_config = await _get_or_create_ai_config(db, target_clinic_id)
+        base_url = ai_config.base_url
+        max_tokens = ai_config.max_tokens
+        temperature = ai_config.temperature
+    else:
+        base_url = config.get("base_url")
+        max_tokens = config.get("max_tokens", 2000)
+        temperature = config.get("temperature", 0.7)
     
-    return {
-        "success": True,
-        "message": "Connection test successful",
-        "provider": provider,
-        "model": model,
-        "response_time_ms": response_time_ms
-    }
+    # Encrypt API key for service (it will decrypt it)
+    api_key_encrypted = encrypt(api_key) if api_key else None
+    
+    # Test connection using AI service
+    try:
+        ai_service = create_ai_service(
+            provider=provider,
+            api_key_encrypted=api_key_encrypted or api_key,  # Pass encrypted or plain if encryption fails
+            model=model,
+            base_url=base_url,
+            max_tokens=max_tokens,
+            temperature=temperature
+        )
+        
+        result = await ai_service.test_connection()
+        return result
+    
+    except AIServiceError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Connection test failed: {str(e)}"
+        )
 
 
 @router.get("/stats")
