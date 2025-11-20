@@ -159,14 +159,15 @@ async def get_ai_config(
         # Regular admin gets their own clinic
         target_clinic_id = current_user.clinic_id
     
-    # Check license (SuperAdmin can view even without AI module enabled)
+    # Check license (SuperAdmin can view even without license or AI module enabled)
     is_superadmin = current_user.role == "admin" and current_user.role_id == 1
-    license_obj = await _get_clinic_license(db, target_clinic_id, check_ai_module=not is_superadmin)
+    license_obj = await _get_clinic_license(db, target_clinic_id, check_ai_module=False)
     
-    if not license_obj:
+    # For non-SuperAdmin, require license
+    if not license_obj and not is_superadmin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Clinic does not have a license or AI module is not enabled for this clinic's license"
+            detail="Clinic does not have a license"
         )
     
     # Get or create config
@@ -175,31 +176,40 @@ async def get_ai_config(
     # Decrypt API key for response
     api_key = decrypt(config.api_key_encrypted) if config.api_key_encrypted else ""
     
-    # Get token limit from license
-    token_limit = license_obj.ai_token_limit
-    if token_limit is None:
-        # Calculate from plan if not explicitly set
-        token_limit = _get_token_limit_by_plan(license_obj.plan)
-    
     result = config.to_dict(include_api_key=True)
     result["api_key"] = api_key
     
-    # Check if AI module is enabled
-    ai_enabled = "ai" in license_obj.modules or "api" in license_obj.modules
-    result["ai_module_enabled"] = ai_enabled
-    
-    if ai_enabled:
-        result["token_limit"] = token_limit
-        result["token_limit_type"] = "unlimited" if token_limit == -1 else "limited"
-        result["tokens_remaining"] = (
-            -1 if token_limit == -1
-            else max(0, token_limit - config.get_monthly_token_usage())
-        )
+    # Handle license and token limits
+    if license_obj:
+        # Get token limit from license
+        token_limit = license_obj.ai_token_limit
+        if token_limit is None:
+            # Calculate from plan if not explicitly set
+            token_limit = _get_token_limit_by_plan(license_obj.plan)
+        
+        # Check if AI module is enabled
+        ai_enabled = "ai" in license_obj.modules or "api" in license_obj.modules
+        result["ai_module_enabled"] = ai_enabled
+        
+        if ai_enabled:
+            result["token_limit"] = token_limit
+            result["token_limit_type"] = "unlimited" if token_limit == -1 else "limited"
+            result["tokens_remaining"] = (
+                -1 if token_limit == -1
+                else max(0, token_limit - config.get_monthly_token_usage())
+            )
+        else:
+            # Return defaults if AI module not enabled
+            result["token_limit"] = None
+            result["token_limit_type"] = "disabled"
+            result["tokens_remaining"] = None
     else:
-        # Return defaults if AI module not enabled
+        # No license - SuperAdmin can still view but with warnings
+        result["ai_module_enabled"] = False
         result["token_limit"] = None
-        result["token_limit_type"] = "disabled"
+        result["token_limit_type"] = "no_license"
         result["tokens_remaining"] = None
+        result["warning"] = "Clinic does not have a license. Please create a license and enable the AI module first."
     
     return result
 
