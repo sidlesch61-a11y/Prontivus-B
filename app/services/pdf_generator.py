@@ -25,6 +25,7 @@ from typing import Dict, Any, List, Optional
 from io import BytesIO
 from datetime import datetime
 import os
+import logging
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm, inch
@@ -39,6 +40,56 @@ except ImportError:
     PIL_AVAILABLE = False
 
 
+def _resolve_logo_path() -> Optional[str]:
+    """
+    Resolve an absolute path to the **brand logo** image.
+
+    Important: Consultation reports already use a logo resolution
+    strategy that works in your environment. To ensure the same
+    behaviour for prescriptions and certificates, we mirror that
+    logic here.
+
+    Priority:
+      1) PRONTIVUS_LOGO_PATH env var (absolute or relative)
+      2) Backend static copy:
+         app/static/Prontivus Horizontal Transparents.png
+      3) \"public/Logo/Prontivus Horizontal Transparents.png\" (when
+         running from project root/backend)
+      4) \"../frontend/public/Logo/Prontivus Horizontal Transparents.png\"
+         (when backend is executed from the monorepo root)
+    """
+    # 1) Explicit override via env var (optional)
+    env_path = os.getenv("PRONTIVUS_LOGO_PATH")
+    if env_path:
+        # Absolute path
+        if os.path.isabs(env_path) and os.path.exists(env_path):
+            return env_path
+        # Relative path from current working directory
+        if os.path.exists(env_path):
+            return os.path.abspath(env_path)
+
+    # 2) Backend static copy (recommended deployment location)
+    services_dir = os.path.dirname(__file__)
+    backend_static = os.path.abspath(
+        os.path.join(services_dir, "..", "static", "Prontivus Horizontal Transparents.png")
+    )
+    if os.path.exists(backend_static):
+        return backend_static
+
+    # 3) Same defaults used by consultation PDF header
+    #    a) public/Logo/... (when running from project root/backend)
+    default_relative = os.path.join("public", "Logo", "Prontivus Horizontal Transparents.png")
+    if os.path.exists(default_relative):
+        return os.path.abspath(default_relative)
+
+    #    b) ../frontend/public/Logo/... (when running from backend directory)
+    fallback_frontend = os.path.join("..", "frontend", "public", "Logo", "Prontivus Horizontal Transparents.png")
+    if os.path.exists(fallback_frontend):
+        return os.path.abspath(fallback_frontend)
+
+    return None
+
+
 def _draw_header(
     c: canvas.Canvas,
     page_width: float,
@@ -46,26 +97,33 @@ def _draw_header(
     clinic: Dict[str, Any],
     document_type: str,
     issuance_dt: Optional[datetime] = None,
-) -> None:
-    logo_path = os.getenv("PRONTIVUS_LOGO_PATH", "public/Logo/Prontivus Horizontal Transparents.png")
-    # Try alternative paths if default doesn't exist
-    if not os.path.exists(logo_path):
-        # Try frontend public path
-        frontend_logo_path = os.path.join("..", "frontend", "public", "Logo", "Prontivus Horizontal Transparents.png")
-        if os.path.exists(frontend_logo_path):
-            logo_path = frontend_logo_path
+) -> float:
+    """
+    Draw the document header with logo and clinic information.
+    
+    Returns:
+        The Y position (in points) where document content should start (below the header divider).
+    """
+    logo_path = _resolve_logo_path()
+    
+    # Debug logging (can be removed in production)
+    logger = logging.getLogger(__name__)
+    if logo_path:
+        logger.info(f"PDF Logo path resolved: {logo_path}, exists: {os.path.exists(logo_path) if logo_path else False}")
+    else:
+        logger.warning("PDF Logo path could not be resolved")
     
     top_y = page_height - 1.8 * cm
     center_x = page_width / 2
 
     # Center: Logo (centered in header)
-    logo_height = 180  # 180 points (3x larger, approximately 6.35 cm)
-    # Position logo: logo_y is the bottom of the logo in ReportLab coordinates
-    # With larger logo, position it so top is near page top with small margin
-    logo_height_cm = logo_height / 72.0 * 2.54  # Convert points to cm
-    logo_y = page_height - 0.5 * cm - logo_height_cm  # Top margin + logo height
+    # Use a more reasonable logo size (2.5 inches height for horizontal logos)
+    logo_height = 2.5 * inch  # ~180 points, approximately 6.35 cm
+    logo_drawn = False
+    logo_bottom_y = None
+    
     try:
-        if os.path.exists(logo_path):
+        if logo_path and os.path.exists(logo_path):
             logo_width = None
             
             if PIL_AVAILABLE:
@@ -76,33 +134,104 @@ def _draw_header(
                         aspect_ratio = img_width / img_height
                         # Calculate width based on fixed height to maintain aspect ratio
                         logo_width = logo_height * aspect_ratio
-                except Exception:
+                        logger.info(f"Logo dimensions: {img_width}x{img_height}, calculated width: {logo_width}")
+                except Exception as e:
                     # If PIL fails, fall through to fallback
+                    logger.warning(f"PIL failed to open logo: {e}")
                     pass
             
             if logo_width is None:
-                # Fallback: use reasonable default for horizontal logos (typical 4:1 ratio)
-                # This ensures centering works even without PIL
-                logo_width = 9 * inch
+                # Fallback: use reasonable default for horizontal logos (typical 3:2 ratio for this logo)
+                # Based on actual logo size 1536x1024 = 1.5:1 ratio
+                logo_width = logo_height * 1.5
+                logger.info(f"Using fallback logo width: {logo_width}")
+            
+            # Position logo at top of page with small margin
+            # logo_y is the BOTTOM of the logo in ReportLab coordinates (y=0 is bottom of page)
+            logo_y = page_height - 0.8 * cm - logo_height
+            logo_bottom_y = logo_y  # Store for positioning text below
             
             # Center the logo horizontally
             logo_x = center_x - (logo_width / 2)
-            # Specify both dimensions with preserveAspectRatio=True to maintain correct aspect ratio
-            c.drawImage(logo_path, logo_x, logo_y, width=logo_width, height=logo_height, preserveAspectRatio=True, mask='auto')
-    except Exception:
-        # If logo loading fails, continue without it
-        pass
+            logger.info(f"Drawing logo at position: x={logo_x:.2f}, y={logo_y:.2f}, width={logo_width:.2f}, height={logo_height:.2f}")
+            
+            # Draw the logo - try without mask first, then with mask if needed
+            try:
+                c.drawImage(
+                    logo_path,
+                    logo_x,
+                    logo_y,
+                    width=logo_width,
+                    height=logo_height,
+                    preserveAspectRatio=True,
+                    mask="auto",
+                )
+            except Exception as mask_error:
+                # If mask="auto" fails, try without mask
+                logger.warning(f"drawImage with mask failed, trying without: {mask_error}")
+                c.drawImage(
+                    logo_path,
+                    logo_x,
+                    logo_y,
+                    width=logo_width,
+                    height=logo_height,
+                    preserveAspectRatio=True,
+                )
+            
+            logo_drawn = True
+            logger.info("Logo successfully drawn on PDF")
+    except Exception as e:
+        # If logo loading fails, log the error and continue with text-based fallback logo
+        logger.error(f"Failed to draw logo on PDF: {e}", exc_info=True)
+        logo_drawn = False
 
-    # Below logo: clinic name + details (centered)
-    # Position below the larger logo with appropriate spacing
-    clinic_name_y = logo_y - 0.5 * cm
+    # If no image logo was drawn, render a simple text-based brand mark
+    if not logo_drawn:
+        text_logo_y = page_height - 1.2 * cm
+        c.setFont("Helvetica-Bold", 18)
+        c.setFillColorRGB(0.0, 0.45, 0.8)  # Prontivus brand blue
+        c.drawCentredString(center_x, text_logo_y, "PRONTIVUS")
+        c.setFillColor(colors.black)
+        logo_bottom_y = text_logo_y - 0.3 * cm
+
+    # Below logo: clinic/company identification (centered)
+    # Position below the logo with appropriate spacing
+    if logo_bottom_y is None:
+        logo_bottom_y = page_height - 0.8 * cm - logo_height
+    clinic_name_y = logo_bottom_y - 0.6 * cm
     c.setFont("Helvetica-Bold", 12)
     clinic_name = (clinic.get("name") or "Prontivus Clinic").strip()
     c.drawCentredString(center_x, clinic_name_y, clinic_name)
+
+    # Build clinic/company detail lines
     c.setFont("Helvetica", 9)
-    details = clinic.get("details") or clinic.get("address") or ""
-    if details:
-        c.drawCentredString(center_x, clinic_name_y - 0.4 * cm, str(details)[:90])
+    # First line: address or custom details string
+    address_or_details = clinic.get("details") or clinic.get("address") or ""
+
+    # Second line: CNPJ, phone, email (when available)
+    tax_id = (clinic.get("tax_id") or clinic.get("cnpj") or "").strip()
+    phone = (clinic.get("phone") or "").strip()
+    email = (clinic.get("email") or "").strip()
+
+    info_parts = []
+    if tax_id:
+        info_parts.append(f"CNPJ: {tax_id}")
+    if phone:
+        info_parts.append(f"Tel: {phone}")
+    if email:
+        info_parts.append(email)
+
+    info_line = "  •  ".join(info_parts)
+
+    # Draw address/details line (if any)
+    text_y = clinic_name_y - 0.4 * cm
+    if address_or_details:
+        c.drawCentredString(center_x, text_y, str(address_or_details)[:110])
+        text_y -= 0.35 * cm
+
+    # Draw info line (if any)
+    if info_line:
+        c.drawCentredString(center_x, text_y, info_line[:110])
 
     # Right: document type + date
     right_x = page_width - 1.5 * cm
@@ -113,9 +242,13 @@ def _draw_header(
     c.drawRightString(right_x, page_height - 1.9 * cm, issued.strftime("%d/%m/%Y %H:%M"))
 
     # Divider (below logo and clinic info)
-    divider_y = clinic_name_y - (0.6 * cm if details else 0.4 * cm)
+    divider_y = text_y - 0.4 * cm
     c.setStrokeColor(colors.lightgrey)
     c.line(1.5 * cm, divider_y, page_width - 1.5 * cm, divider_y)
+    
+    # Return the Y position where content should start (below divider with spacing)
+    content_start_y = divider_y - 0.6 * cm
+    return content_start_y
 
 
 def _draw_footer(c: canvas.Canvas, page_width: float) -> None:
@@ -141,12 +274,19 @@ def _draw_signature(
     c.drawCentredString(x + line_width / 2, y - 12, f"Dr. {doc_name} - CRM/{crm}")
 
 
-def _begin_doc(document_type: str, clinic: Dict[str, Any]) -> canvas.Canvas:
+def _begin_doc(document_type: str, clinic: Dict[str, Any]) -> tuple[canvas.Canvas, float]:
+    """
+    Initialize a new PDF document with header.
+    
+    Returns:
+        Tuple of (canvas, content_start_y) where content_start_y is the Y position
+        where document content should start (below the header).
+    """
     buf = BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     width, height = A4
-    _draw_header(c, width, height, clinic, document_type)
-    return c
+    content_start_y = _draw_header(c, width, height, clinic, document_type)
+    return c, content_start_y
 
 
 def _finalize(c: canvas.Canvas) -> bytes:
@@ -164,44 +304,106 @@ def generate_prescription_pdf(
     doctor: Dict[str, Any],
     medications: List[Dict[str, Any]],  # name, dosage, frequency, duration, notes
 ) -> bytes:
-    c = _begin_doc("Prescrição", clinic)
+    c, content_start_y = _begin_doc("Prescrição", clinic)
     width, height = A4
-    y = height - 3.5 * cm
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(1.5 * cm, y, "Paciente:")
-    c.setFont("Helvetica", 10)
-    c.drawString(3.2 * cm, y, f"{patient.get('name','')}  |  {patient.get('id','')}")
-    y -= 0.6 * cm
-    c.drawString(1.5 * cm, y, f"Data: {datetime.now().strftime('%d/%m/%Y')}")
-    y -= 0.8 * cm
 
-    # Table header
+    # Draw a soft card background to give a modern look
+    card_margin_x = 1.4 * cm
+    card_margin_y = 2.0 * cm  # Start card below header
+    card_width = width - 2 * card_margin_x
+    card_height = content_start_y - card_margin_y - 4.0 * cm  # Leave space for footer
+    c.setFillColor(colors.whitesmoke)
+    c.roundRect(card_margin_x, card_margin_y, card_width, card_height, 10, stroke=0, fill=1)
+    c.setFillColor(colors.black)
+
+    # Top section: patient info - start below header
+    y = content_start_y
+    x_left = card_margin_x + 0.6 * cm
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(x_left, y, "Paciente")
+    c.setFont("Helvetica", 10)
+    c.drawString(x_left + 2.4 * cm, y, f"{patient.get('name','')}  |  {patient.get('id','')}")
+    y -= 0.6 * cm
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(x_left, y, "Data")
+    c.setFont("Helvetica", 10)
+    c.drawString(x_left + 2.4 * cm, y, datetime.now().strftime("%d/%m/%Y"))
+    y -= 0.9 * cm
+
+    # Table header with colored band
     c.setFont("Helvetica-Bold", 10)
     cols = ["Medicamento", "Dosagem", "Frequência", "Duração", "Observações"]
-    col_x = [1.5 * cm, 7.5 * cm, 11.0 * cm, 14.0 * cm, 16.5 * cm]
+    col_x = [
+        x_left,
+        x_left + 6.0 * cm,
+        x_left + 9.3 * cm,
+        x_left + 12.3 * cm,
+        x_left + 14.8 * cm,
+    ]
+
+    header_height = 0.7 * cm
+    c.setFillColorRGB(0.90, 0.95, 1.0)  # light blue band
+    c.roundRect(
+        card_margin_x + 0.3 * cm,
+        y - 0.25 * cm,
+        card_width - 0.6 * cm,
+        header_height,
+        4,
+        stroke=0,
+        fill=1,
+    )
+    c.setFillColor(colors.black)
+
     for i, col in enumerate(cols):
         c.drawString(col_x[i], y, col)
     y -= 0.4 * cm
-    c.setStrokeColor(colors.black)
-    c.line(1.5 * cm, y, width - 1.5 * cm, y)
-    y -= 0.3 * cm
+    c.setStrokeColor(colors.lightgrey)
+    c.line(card_margin_x + 0.3 * cm, y, width - card_margin_x - 0.3 * cm, y)
+    y -= 0.25 * cm
     c.setFont("Helvetica", 10)
+
     for m in medications:
         if y < 3.5 * cm:
             _draw_footer(c, width)
             c.showPage()
-            _draw_header(c, width, height, clinic, "Prescrição")
-            y = height - 3.5 * cm
+            new_content_start_y = _draw_header(c, width, height, clinic, "Prescrição")
+            # Redraw card and header row on new page
+            c.setFillColor(colors.whitesmoke)
+            c.roundRect(card_margin_x, card_margin_y, card_width, card_height, 10, stroke=0, fill=1)
+            c.setFillColor(colors.black)
+            y = new_content_start_y
+            c.setFont("Helvetica-Bold", 10)
+            c.setFillColorRGB(0.90, 0.95, 1.0)
+            c.roundRect(
+                card_margin_x + 0.3 * cm,
+                y - 0.25 * cm,
+                card_width - 0.6 * cm,
+                header_height,
+                4,
+                stroke=0,
+                fill=1,
+            )
+            c.setFillColor(colors.black)
             c.setFont("Helvetica-Bold", 10)
             for i, col in enumerate(cols):
                 c.drawString(col_x[i], y, col)
-            y -= 0.7 * cm
+            y -= 0.4 * cm
+            c.setStrokeColor(colors.lightgrey)
+            c.line(card_margin_x + 0.3 * cm, y, width - card_margin_x - 0.3 * cm, y)
+            y -= 0.25 * cm
             c.setFont("Helvetica", 10)
-        c.drawString(col_x[0], y, str(m.get('name',''))[:28])
-        c.drawString(col_x[1], y, str(m.get('dosage',''))[:18])
-        c.drawString(col_x[2], y, str(m.get('frequency',''))[:18])
-        c.drawString(col_x[3], y, str(m.get('duration',''))[:12])
-        c.drawString(col_x[4], y, str(m.get('notes',''))[:32])
+
+        # Zebra rows for readability
+        if int((card_height - (y - card_margin_y)) / (0.7 * cm)) % 2 == 0:
+            c.setFillColorRGB(0.98, 0.98, 0.98)
+            c.rect(card_margin_x + 0.3 * cm, y - 0.15 * cm, card_width - 0.6 * cm, 0.55 * cm, stroke=0, fill=1)
+            c.setFillColor(colors.black)
+
+        c.drawString(col_x[0], y, str(m.get("name", ""))[:32])
+        c.drawString(col_x[1], y, str(m.get("dosage", ""))[:20])
+        c.drawString(col_x[2], y, str(m.get("frequency", ""))[:20])
+        c.drawString(col_x[3], y, str(m.get("duration", ""))[:14])
+        c.drawString(col_x[4], y, str(m.get("notes", ""))[:40])
         y -= 0.6 * cm
 
     # Signature
@@ -216,22 +418,62 @@ def generate_medical_certificate_pdf(
     justification: str,
     validity_days: int,
 ) -> bytes:
-    c = _begin_doc("Atestado Médico", clinic)
+    c, content_start_y = _begin_doc("Atestado Médico", clinic)
     width, height = A4
-    y = height - 3.5 * cm
-    c.setFont("Helvetica", 11)
-    c.drawString(1.5 * cm, y, f"Paciente: {patient.get('name','')}")
-    y -= 0.8 * cm
-    c.drawString(1.5 * cm, y, f"Documento: {patient.get('document','')}")
-    y -= 1.0 * cm
-    text = f"Justificativa: {justification}"
-    for line in _wrap_text(text, 90):
-        c.drawString(1.5 * cm, y, line)
-        y -= 0.6 * cm
-    y -= 0.4 * cm
-    c.drawString(1.5 * cm, y, f"Validade: {validity_days} dias")
 
-    _draw_signature(c, width, 2.8 * cm, doctor)
+    # Card background for modern layout - positioned below header
+    card_margin_x = 1.8 * cm
+    card_margin_y = 2.0 * cm  # Start below header
+    card_width = width - 2 * card_margin_x
+    card_height = content_start_y - card_margin_y - 4.0 * cm  # Leave space for footer
+    c.setFillColorRGB(0.98, 0.98, 0.98)
+    c.roundRect(card_margin_x, card_margin_y, card_width, card_height, 12, stroke=0, fill=1)
+    c.setFillColor(colors.black)
+
+    # Header inside card - start below document header
+    y = content_start_y
+    x_left = card_margin_x + 0.8 * cm
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(x_left, y, "Atestado Médico")
+    y -= 1.0 * cm
+
+    # Patient info
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(x_left, y, "Paciente:")
+    c.setFont("Helvetica", 11)
+    c.drawString(x_left + 2.4 * cm, y, patient.get("name", ""))
+    y -= 0.7 * cm
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(x_left, y, "Documento:")
+    c.setFont("Helvetica", 11)
+    c.drawString(x_left + 2.4 * cm, y, patient.get("document", ""))
+    y -= 1.0 * cm
+
+    # Justification paragraph
+    c.setFont("Helvetica", 11)
+    justificacao = justification or ""
+    if justificacao:
+        pref = "Justificativa: "
+        text = pref + justificacao
+        # Indent following lines to align with text after label
+        lines = _wrap_text(text, 90)
+        for idx, line in enumerate(lines):
+            if idx == 0:
+                c.drawString(x_left, y, line)
+            else:
+                c.drawString(x_left + c.stringWidth("Justificativa: ", "Helvetica", 11), y, line)
+            y -= 0.6 * cm
+        y -= 0.4 * cm
+
+    # Validity
+    if validity_days:
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(x_left, y, "Validade:")
+        c.setFont("Helvetica", 11)
+        c.drawString(x_left + 2.4 * cm, y, f"{validity_days} dias")
+
+    # Signature area
+    _draw_signature(c, width, card_margin_y + 1.2 * cm, doctor)
     return _finalize(c)
 
 
@@ -243,9 +485,9 @@ def generate_referral_pdf(
     reason: str,
     urgency: str,
 ) -> bytes:
-    c = _begin_doc("Encaminhamento", clinic)
+    c, content_start_y = _begin_doc("Encaminhamento", clinic)
     width, height = A4
-    y = height - 3.5 * cm
+    y = content_start_y
     c.setFont("Helvetica", 11)
     c.drawString(1.5 * cm, y, f"Paciente: {patient.get('name','')}")
     y -= 0.7 * cm
@@ -268,9 +510,9 @@ def generate_receipt_pdf(
     services: List[Dict[str, Any]],  # description, qty, unit_price
     payments: Optional[List[Dict[str, Any]]] = None,  # method, amount, date
 ) -> bytes:
-    c = _begin_doc("Recibo", clinic)
+    c, content_start_y = _begin_doc("Recibo", clinic)
     width, height = A4
-    y = height - 3.5 * cm
+    y = content_start_y
     c.setFont("Helvetica", 11)
     c.drawString(1.5 * cm, y, f"Paciente: {patient.get('name','')}")
     y -= 0.8 * cm
@@ -295,8 +537,8 @@ def generate_receipt_pdf(
         if y < 4.0 * cm:
             _draw_footer(c, width)
             c.showPage()
-            _draw_header(c, width, height, clinic, "Recibo")
-            y = height - 3.5 * cm
+            new_content_start_y = _draw_header(c, width, height, clinic, "Recibo")
+            y = new_content_start_y
             c.setFont("Helvetica-Bold", 10)
             for i, h in enumerate(headers):
                 c.drawString(xcol[i], y, h)

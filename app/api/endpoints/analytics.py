@@ -45,23 +45,29 @@ async def get_dashboard_stats(
     Returns metrics for patients, appointments, revenue, and other key indicators.
     """
     try:
+        logger.info(f"Fetching dashboard stats for clinic_id: {current_user.clinic_id}, user: {current_user.email}")
         now = datetime.now(timezone.utc)
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         this_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         last_month_start = (this_month_start - timedelta(days=1)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         last_month_end = this_month_start - timedelta(seconds=1)
         
-        # Total active patients
+        # Total active patients (only count active patients)
         total_patients_query = select(func.count(Patient.id)).filter(
-            Patient.clinic_id == current_user.clinic_id
+            and_(
+                Patient.clinic_id == current_user.clinic_id,
+                Patient.is_active == True
+            )
         )
         total_patients_result = await db.execute(total_patients_query)
         total_patients = total_patients_result.scalar() or 0
+        logger.info(f"Total active patients for clinic {current_user.clinic_id}: {total_patients}")
         
-        # Patients last month (for change calculation)
+        # Patients last month (for change calculation) - only active patients
         patients_last_month_query = select(func.count(Patient.id)).filter(
             and_(
                 Patient.clinic_id == current_user.clinic_id,
+                Patient.is_active == True,
                 Patient.created_at >= last_month_start,
                 Patient.created_at <= last_month_end,
             )
@@ -74,15 +80,23 @@ async def get_dashboard_stats(
         if patients_last_month > 0:
             patients_change = ((total_patients - patients_last_month) / patients_last_month) * 100
         
-        # Appointments this month
+        # Appointments this month (scheduled in current month)
+        # Calculate end of current month
+        if now.month == 12:
+            next_month_start = now.replace(year=now.year + 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        else:
+            next_month_start = now.replace(month=now.month + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        
         appointments_this_month_query = select(func.count(Appointment.id)).filter(
             and_(
                 Appointment.clinic_id == current_user.clinic_id,
                 Appointment.scheduled_datetime >= this_month_start,
+                Appointment.scheduled_datetime < next_month_start,
             )
         )
         appointments_this_month_result = await db.execute(appointments_this_month_query)
         appointments_this_month = appointments_this_month_result.scalar() or 0
+        logger.info(f"Appointments this month for clinic {current_user.clinic_id}: {appointments_this_month}")
         
         # Appointments last month
         appointments_last_month_query = select(func.count(Appointment.id)).filter(
@@ -152,11 +166,18 @@ async def get_dashboard_stats(
         pending_results_result = await db.execute(pending_results_query)
         pending_results = pending_results_result.scalar() or 0
         
-        # For satisfaction score, we'll use a placeholder (could be from a feedback/rating table if it exists)
-        # Default to a neutral value
-        satisfaction_score = 94.2  # Placeholder - can be calculated from actual rating data if available
+        # Calculate satisfaction score from feedback/ratings if available
+        # For now, if there's no feedback system, return 0 to indicate no data
+        # TODO: Implement feedback/rating system and calculate from actual patient ratings
+        satisfaction_score = 0.0
+        satisfaction_change = 0.0
         
-        return {
+        # Note: When feedback/rating system is implemented, calculate like this:
+        # - Get average rating from feedback table filtered by clinic_id
+        # - Convert 1-5 scale to 0-100 percentage
+        # - Calculate change from previous month
+        
+        result = {
             "patients": {
                 "value": total_patients,
                 "change": round(patients_change, 1),
@@ -170,8 +191,8 @@ async def get_dashboard_stats(
                 "change": round(revenue_change, 1),
             },
             "satisfaction": {
-                "value": satisfaction_score,
-                "change": 0.0,  # Placeholder
+                "value": round(satisfaction_score, 1),
+                "change": round(satisfaction_change, 1),
             },
             "today_appointments": {
                 "value": today_appointments,
@@ -182,6 +203,8 @@ async def get_dashboard_stats(
                 "change": 0.0,  # Placeholder
             },
         }
+        logger.info(f"Dashboard stats result for clinic {current_user.clinic_id}: patients={result['patients']['value']}, appointments={result['appointments']['value']}, satisfaction={result['satisfaction']['value']}")
+        return result
     except SQLAlchemyError as e:
         logger.error(f"Database error in dashboard stats: {str(e)}", exc_info=True)
         raise HTTPException(

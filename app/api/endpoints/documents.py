@@ -76,6 +76,8 @@ async def _get_consultation_data(
             'address': appointment.clinic.address if appointment.clinic else '',
             'phone': appointment.clinic.phone if appointment.clinic else '',
             'email': appointment.clinic.email if appointment.clinic else '',
+            # CNPJ/CPF da clínica para cabeçalho dos documentos
+            'tax_id': appointment.clinic.tax_id if appointment.clinic else '',
         },
         'patient': {
             'first_name': appointment.patient.first_name if appointment.patient else '',
@@ -195,6 +197,8 @@ async def _get_prescription_data(
             'name': clinic.name if clinic else 'Prontivus Clinic',
             'address': clinic.address if clinic else '',
             'phone': clinic.phone if clinic else '',
+            'email': clinic.email if clinic else '',
+            'tax_id': clinic.tax_id if clinic else '',
         },
         'patient': {
             'name': f"{patient.first_name or ''} {patient.last_name or ''}".strip() if patient else '',
@@ -348,6 +352,8 @@ async def generate_medical_certificate(
                 'name': clinic.name if clinic else 'Prontivus Clinic',
                 'address': clinic.address if clinic else '',
                 'phone': clinic.phone if clinic else '',
+                'email': clinic.email if clinic else '',
+                'tax_id': clinic.tax_id if clinic else '',
             },
             'patient': {
                 'name': f"{patient.first_name} {patient.last_name}".strip(),
