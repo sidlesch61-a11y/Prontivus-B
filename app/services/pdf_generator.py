@@ -740,15 +740,16 @@ class PDFGenerator:
         """Create clinic header with centered logo and information"""
         elements = []
         
-        # Try to load logo - check multiple paths
-        logo_path = os.getenv("PRONTIVUS_LOGO_PATH", "public/Logo/Prontivus Horizontal Transparents.png")
-        if not os.path.exists(logo_path):
-            # Try frontend public path
-            frontend_logo_path = os.path.join("..", "frontend", "public", "Logo", "Prontivus Horizontal Transparents.png")
-            if os.path.exists(frontend_logo_path):
-                logo_path = frontend_logo_path
+        # Use the same logo resolution logic as other PDFs
+        logo_path = _resolve_logo_path()
+        logo_exists = logo_path is not None and os.path.exists(logo_path)
         
-        logo_exists = os.path.exists(logo_path)
+        # Debug logging
+        logger = logging.getLogger(__name__)
+        if logo_path:
+            logger.info(f"Consultation PDF Logo path resolved: {logo_path}, exists: {logo_exists}")
+        else:
+            logger.warning("Consultation PDF Logo path could not be resolved")
         
         # Logo row - centered
         if logo_exists:
@@ -783,20 +784,33 @@ class PDFGenerator:
                 ]))
                 elements.append(logo_table)
                 elements.append(Spacer(1, 8))
+                logger.info("Logo successfully added to consultation PDF header")
             except Exception as e:
-                # If logo loading fails, continue without it
-                pass
+                # If logo loading fails, log and continue without it
+                logger.error(f"Failed to add logo to consultation PDF: {e}", exc_info=True)
         
         # Clinic information row - centered below logo
         clinic_name = clinic_data.get('name', 'Prontivus Clinic')
         clinic_address = clinic_data.get('address', '')
         clinic_phone = clinic_data.get('phone', '')
+        clinic_email = clinic_data.get('email', '')
+        clinic_tax_id = clinic_data.get('tax_id', '') or clinic_data.get('cnpj', '')
         
         center_content = f"<b>{clinic_name}</b>"
         if clinic_address:
             center_content += f"<br/>{clinic_address}"
+        
+        # Build info line with CNPJ, phone, email
+        info_parts = []
+        if clinic_tax_id:
+            info_parts.append(f"CNPJ: {clinic_tax_id}")
         if clinic_phone:
-            center_content += f"<br/>Tel: {clinic_phone}"
+            info_parts.append(f"Tel: {clinic_phone}")
+        if clinic_email:
+            info_parts.append(clinic_email)
+        
+        if info_parts:
+            center_content += f"<br/>{'  •  '.join(info_parts)}"
         
         # Create a centered table for clinic info
         clinic_info_table = Table([[Paragraph(center_content, self.styles['Normal'])]], colWidths=[7*inch])
