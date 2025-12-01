@@ -4,6 +4,8 @@ Admin API endpoints for clinic management and licensing
 
 from datetime import date, timedelta, datetime, timezone
 from typing import List, Optional
+import secrets
+import string
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy import select, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +31,27 @@ from app.models import SystemLog
 from app.schemas.system_log import (
     SystemLogCreate, SystemLogUpdate, SystemLogResponse,
 )
+from app.services.email_service import email_service
+
+
+def generate_secure_password(length: int = 12) -> str:
+    """
+    Generate a secure random password that meets basic complexity requirements.
+    """
+    if length < 10:
+        length = 10
+
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*()-_=+"
+
+    while True:
+        pwd = "".join(secrets.choice(alphabet) for _ in range(length))
+        if (
+            any(c.islower() for c in pwd)
+            and any(c.isupper() for c in pwd)
+            and any(c.isdigit() for c in pwd)
+            and any(c in "!@#$%^&*()-_=+" for c in pwd)
+        ):
+            return pwd
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -708,11 +731,8 @@ async def create_clinic(
             admin_email = f"admin{email_counter}@{clinic_name_slug}.com"
         email_counter += 1
     
-    # Generate default password: clinic name + "123!" (user should change on first login)
-    default_password = f"{clinic_data.name.replace(' ', '')}123!"
-    # Ensure password meets minimum requirements (at least 8 chars)
-    if len(default_password) < 8:
-        default_password = f"{clinic_data.name.replace(' ', '')}Admin123!"
+    # Generate secure random password for the clinic admin user
+    default_password = generate_secure_password()
     
     # Create AdminClinica user for the new clinic
     admin_user = User(
@@ -733,6 +753,47 @@ async def create_clinic(
     await db.commit()
     await db.refresh(clinic)
     await db.refresh(admin_user)
+    
+    # Send credentials email to clinic email if available
+    if clinic.email:
+        try:
+            login_url = "/portal/login"
+            # Basic HTML email with credentials
+            html_body = f"""
+            <p>Olá,</p>
+            <p>Sua clínica <strong>{clinic.name}</strong> foi cadastrada com sucesso no Prontivus.</p>
+            <p>Segue abaixo o usuário administrador da clínica:</p>
+            <ul>
+                <li><strong>Usuário:</strong> {username}</li>
+                <li><strong>E-mail:</strong> {admin_email}</li>
+                <li><strong>Senha provisória:</strong> {default_password}</li>
+            </ul>
+            <p>Por segurança, recomendamos que a senha seja alterada no primeiro acesso.</p>
+            <p>Você pode acessar o sistema pelo link: <a href="{login_url}">{login_url}</a></p>
+            <p>Atenciosamente,<br/>Equipe Prontivus</p>
+            """
+            text_body = (
+                f"Olá,\n\n"
+                f"Sua clínica {clinic.name} foi cadastrada com sucesso no Prontivus.\n\n"
+                f"Usuário administrador:\n"
+                f"- Usuário: {username}\n"
+                f"- E-mail: {admin_email}\n"
+                f"- Senha provisória: {default_password}\n\n"
+                f"Por segurança, recomendamos que a senha seja alterada no primeiro acesso.\n\n"
+                f"Acesse: {login_url}\n\n"
+                f"Atenciosamente,\nEquipe Prontivus\n"
+            )
+            await email_service.send_email(
+                to_email=clinic.email,
+                subject="Prontivus - Acesso do Administrador da Clínica",
+                html_body=html_body,
+                text_body=text_body,
+            )
+        except Exception:
+            # Don't fail clinic creation if email sending fails
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.exception("Failed to send clinic admin credentials email")
     
     # Log the creation
     try:
