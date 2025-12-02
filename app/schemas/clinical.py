@@ -83,6 +83,10 @@ class ExamRequestCreate(ExamRequestBase):
     clinical_record_id: int
 
 
+class ExamRequestFromAppointmentCreate(ExamRequestBase):
+    appointment_id: int
+
+
 class ExamRequestUpdate(BaseModel):
     exam_type: Optional[str] = Field(None, max_length=200)
     description: Optional[str] = None
@@ -90,6 +94,7 @@ class ExamRequestUpdate(BaseModel):
     urgency: Optional[UrgencyLevel] = None
     completed: Optional[bool] = None
     completed_date: Optional[datetime.datetime] = None
+    exam_catalog_id: Optional[int] = None
 
 
 class ExamRequestResponse(ExamRequestBase):
@@ -103,6 +108,16 @@ class ExamRequestResponse(ExamRequestBase):
     
     class Config:
         from_attributes = True
+
+
+# ==================== Exam Result Update (for staff) ====================
+
+class ExamResultUpdate(BaseModel):
+    """Payload used by staff (secretary/admin) to register exam results."""
+    description: Optional[str] = None
+    completed: bool = True
+    completed_date: Optional[datetime.datetime] = None
+    exam_catalog_id: Optional[int] = None
 
 
 # ==================== Complete Clinical Record with Relations ====================

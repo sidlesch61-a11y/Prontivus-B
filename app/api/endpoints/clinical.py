@@ -12,7 +12,7 @@ from datetime import datetime, date
 
 from app.core.auth import get_current_user, RoleChecker
 from app.models import User, Appointment, Patient, UserRole
-from app.models.clinical import ClinicalRecord, Prescription, ExamRequest, Diagnosis, ClinicalRecordVersion
+from app.models.clinical import ClinicalRecord, Prescription, ExamRequest, Diagnosis, ClinicalRecordVersion, ExamCatalog
 from app.schemas.clinical import (
     ClinicalRecordCreate,
     ClinicalRecordUpdate,
@@ -30,8 +30,13 @@ from app.schemas.clinical import (
     ExamRequestCreate,
     ExamRequestUpdate,
     ExamRequestResponse,
+    ExamResultUpdate,
     PatientClinicalHistoryResponse,
     ClinicalRecordVersionResponse,
+    ExamCatalogCreate,
+    ExamCatalogUpdate,
+    ExamCatalogResponse,
+    ExamRequestFromAppointmentCreate,
 )
 from database import get_async_session
 from io import BytesIO
@@ -41,6 +46,223 @@ router = APIRouter(tags=["Clinical"])
 # Role checker for doctors (only doctors can create clinical records)
 require_doctor = RoleChecker([UserRole.DOCTOR, UserRole.ADMIN])
 require_staff = RoleChecker([UserRole.ADMIN, UserRole.SECRETARY, UserRole.DOCTOR])
+
+
+# ==================== Exam Catalog (Admin/Secretary) ====================
+
+@router.post("/exam-catalog", response_model=ExamCatalogResponse, status_code=status.HTTP_201_CREATED)
+async def create_exam_catalog_item(
+    exam_in: ExamCatalogCreate,
+    current_user: User = Depends(require_staff),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Create a new exam type in the catalog (clinic-scoped).
+    """
+    db_exam = ExamCatalog(
+        clinic_id=current_user.clinic_id,
+        **exam_in.model_dump(),
+    )
+    db.add(db_exam)
+    await db.commit()
+    await db.refresh(db_exam)
+    return ExamCatalogResponse.model_validate(db_exam)
+
+
+@router.get("/exam-catalog", response_model=List[ExamCatalogResponse])
+async def list_exam_catalog_items(
+    search: Optional[str] = Query(None, description="Search by code or name"),
+    is_active: Optional[bool] = Query(None, description="Filter by active status"),
+    current_user: User = Depends(require_staff),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    List exam catalog items for the current clinic.
+    """
+    query = select(ExamCatalog).filter(ExamCatalog.clinic_id == current_user.clinic_id)
+    if is_active is not None:
+        query = query.filter(ExamCatalog.is_active == is_active)
+    if search:
+        like = f"%{search}%"
+        query = query.filter(or_(ExamCatalog.name.ilike(like), ExamCatalog.code.ilike(like)))
+    query = query.order_by(ExamCatalog.name)
+
+    result = await db.execute(query)
+    exams = result.scalars().all()
+    return [ExamCatalogResponse.model_validate(e) for e in exams]
+
+
+@router.put("/exam-catalog/{exam_id}", response_model=ExamCatalogResponse)
+async def update_exam_catalog_item(
+    exam_id: int,
+    exam_in: ExamCatalogUpdate,
+    current_user: User = Depends(require_staff),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Update an existing exam type in the catalog.
+    """
+    exam_query = select(ExamCatalog).filter(
+        ExamCatalog.id == exam_id,
+        ExamCatalog.clinic_id == current_user.clinic_id,
+    )
+    exam_result = await db.execute(exam_query)
+    db_exam = exam_result.scalar_one_or_none()
+    if not db_exam:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found")
+
+    update_data = exam_in.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(db_exam, field, value)
+
+    await db.commit()
+    await db.refresh(db_exam)
+    return ExamCatalogResponse.model_validate(db_exam)
+
+
+@router.delete("/exam-catalog/{exam_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_exam_catalog_item(
+    exam_id: int,
+    current_user: User = Depends(require_staff),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Soft-delete an exam from the catalog (marks as inactive).
+    """
+    exam_query = select(ExamCatalog).filter(
+        ExamCatalog.id == exam_id,
+        ExamCatalog.clinic_id == current_user.clinic_id,
+    )
+    exam_result = await db.execute(exam_query)
+    db_exam = exam_result.scalar_one_or_none()
+    if not db_exam:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found")
+
+    db_exam.is_active = False
+    await db.commit()
+    return None
+
+
+# ==================== Exam Requests Management (staff) ====================
+
+@router.get("/exam-requests", response_model=List[ExamRequestResponse])
+async def list_exam_requests_for_clinic(
+    status_filter: Optional[str] = Query(
+        None,
+        description="Filter by status: pending or completed",
+        regex="^(pending|completed)$",
+    ),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    patient_id: Optional[int] = Query(None),
+    current_user: User = Depends(require_staff),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    List exam requests for the current clinic so Secretaria/Admin can register results.
+    """
+    query = select(ExamRequest).join(ClinicalRecord).join(Appointment).filter(
+        Appointment.clinic_id == current_user.clinic_id
+    )
+
+    if status_filter == "pending":
+        query = query.filter(ExamRequest.completed.is_(False))
+    elif status_filter == "completed":
+        query = query.filter(ExamRequest.completed.is_(True))
+
+    if date_from:
+        query = query.filter(ExamRequest.requested_date >= datetime.combine(date_from, datetime.min.time()))
+    if date_to:
+        query = query.filter(ExamRequest.requested_date <= datetime.combine(date_to, datetime.max.time()))
+
+    if patient_id:
+        query = query.filter(Appointment.patient_id == patient_id)
+
+    query = query.order_by(ExamRequest.requested_date.desc())
+
+    result = await db.execute(query)
+    exams = result.scalars().all()
+    return [ExamRequestResponse.model_validate(e) for e in exams]
+
+
+@router.put("/exam-requests/{exam_id}/result", response_model=ExamRequestResponse)
+async def update_exam_result(
+    exam_id: int,
+    payload: ExamResultUpdate,
+    current_user: User = Depends(require_staff),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Register or update exam results (description, completed flag/date, optional link to catalog).
+    """
+    exam_query = select(ExamRequest).join(ClinicalRecord).join(Appointment).filter(
+        ExamRequest.id == exam_id,
+        Appointment.clinic_id == current_user.clinic_id,
+    )
+    exam_result = await db.execute(exam_query)
+    exam = exam_result.scalar_one_or_none()
+    if not exam:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam request not found")
+
+    data = payload.model_dump(exclude_unset=True)
+
+    # If setting completed without explicit date, default to now
+    if data.get("completed") and not data.get("completed_date"):
+        data["completed_date"] = datetime.utcnow()
+
+    for field, value in data.items():
+        setattr(exam, field, value)
+
+    await db.commit()
+    await db.refresh(exam)
+    return ExamRequestResponse.model_validate(exam)
+
+
+@router.post("/exam-requests/from-appointment", response_model=ExamRequestResponse, status_code=status.HTTP_201_CREATED)
+async def create_exam_request_from_appointment(
+    payload: ExamRequestFromAppointmentCreate,
+    current_user: User = Depends(require_staff),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Create an exam request linked to an appointment (used by Secretaria / Médico via picklist).
+    Will create a minimal ClinicalRecord if none exists yet for that appointment.
+    """
+    # Verify appointment exists and belongs to clinic
+    appt_query = select(Appointment).filter(
+        and_(
+            Appointment.id == payload.appointment_id,
+            Appointment.clinic_id == current_user.clinic_id,
+        )
+    )
+    appt_result = await db.execute(appt_query)
+    appointment = appt_result.scalar_one_or_none()
+    if not appointment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Appointment not found")
+
+    # Get or create clinical record for this appointment
+    record_query = select(ClinicalRecord).filter(ClinicalRecord.appointment_id == appointment.id)
+    record_result = await db.execute(record_query)
+    record = record_result.scalar_one_or_none()
+    if not record:
+        record = ClinicalRecord(appointment_id=appointment.id)
+        db.add(record)
+        await db.commit()
+        await db.refresh(record)
+
+    # Create exam request
+    exam = ExamRequest(
+        clinical_record_id=record.id,
+        exam_type=payload.exam_type,
+        description=payload.description,
+        reason=payload.reason,
+        urgency=payload.urgency,
+    )
+    db.add(exam)
+    await db.commit()
+    await db.refresh(exam)
+
+    return ExamRequestResponse.model_validate(exam)
 # ==================== Autosave & Version History ====================
 
 @router.post("/appointments/{appointment_id}/clinical-record/autosave")

@@ -159,6 +159,7 @@ class UserResponse(BaseModel):
     is_verified: bool
     clinic_id: int
     clinic: Optional[ClinicInfo] = None
+    consultation_room: Optional[str] = None
     
     class Config:
         from_attributes = True

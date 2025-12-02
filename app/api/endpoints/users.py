@@ -51,6 +51,7 @@ class UserListResponse(BaseModel):
     clinic_name: Optional[str] = None
     is_active: bool = True
     is_verified: bool = False
+    consultation_room: Optional[str] = None
     
     class Config:
         from_attributes = True
@@ -143,6 +144,7 @@ class UserCreateRequest(BaseModel):
     last_name: Optional[str] = ""
     role: UserRole
     clinic_id: Optional[int] = None  # Allow SuperAdmin to specify clinic_id
+    consultation_room: Optional[str] = None  # Default room for doctors (optional)
 
 
 class UserUpdateRequest(BaseModel):
@@ -153,6 +155,7 @@ class UserUpdateRequest(BaseModel):
     password: Optional[str] = None  # Optional password field
     is_active: Optional[bool] = None
     is_verified: Optional[bool] = None
+    consultation_room: Optional[str] = None  # Allow updating default room
 
 
 @router.post("", response_model=UserListResponse, status_code=status.HTTP_201_CREATED)
@@ -183,6 +186,7 @@ async def create_user(
         clinic_id=target_clinic_id,
         is_active=True,
         is_verified=False,
+        consultation_room=(payload.consultation_room or None),
     )
     db.add(new_user)
     await db.commit()
@@ -244,6 +248,9 @@ async def update_user(
         user.is_active = payload.is_active
     if payload.is_verified is not None:
         user.is_verified = payload.is_verified
+    if payload.consultation_room is not None:
+        # Normalize empty strings to None
+        user.consultation_room = payload.consultation_room.strip() or None
 
     await db.commit()
     await db.refresh(user)

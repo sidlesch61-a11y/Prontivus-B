@@ -126,6 +126,7 @@ class User(BaseModel):
     role = Column(SQLEnum(UserRole), nullable=False, default=UserRole.PATIENT)  # Legacy enum field
     role_id = Column(Integer, ForeignKey("user_roles.id"), nullable=True, index=True)  # New role reference
     permissions = Column(JSON, nullable=True)  # Granular permissions JSON field
+    consultation_room = Column(String(100), nullable=True)  # Default physical room/location for doctors
     
     # Status
     is_active = Column(Boolean, default=True, nullable=False)

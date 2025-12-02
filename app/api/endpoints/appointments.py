@@ -17,6 +17,7 @@ from app.schemas.appointment import (
     AppointmentListResponse,
     AppointmentStatusUpdate,
 )
+from pydantic import BaseModel
 from database import get_async_session
 from app.services.realtime import appointment_realtime_manager
 
@@ -24,6 +25,16 @@ router = APIRouter(prefix="/appointments", tags=["Appointments"])
 
 # Role checker for staff (admin, secretary, doctor)
 require_staff = RoleChecker([UserRole.ADMIN, UserRole.SECRETARY, UserRole.DOCTOR])
+
+
+class TodayPatientResponse(BaseModel):
+  appointment_id: int
+  patient_id: int
+  patient_name: str
+  doctor_id: int
+  doctor_name: str
+  scheduled_datetime: datetime.datetime
+
 
 
 async def check_slot_availability(
@@ -406,7 +417,12 @@ async def book_patient_appointment(
         )
     
     # Create appointment
-    db_appointment = Appointment(**appointment_in.model_dump())
+    appointment_data = appointment_in.model_dump()
+    # If no explicit appointment_type was provided, default to doctor's consultation_room (if any)
+    if not appointment_data.get("appointment_type") and getattr(doctor, "consultation_room", None):
+        appointment_data["appointment_type"] = doctor.consultation_room
+
+    db_appointment = Appointment(**appointment_data)
     db.add(db_appointment)
     await db.commit()
     await db.refresh(db_appointment)
@@ -520,6 +536,61 @@ async def get_doctor_availability(
         "date": date.isoformat(),
         "slots": available_slots
     }
+
+
+@router.get("/today-patients", response_model=list[TodayPatientResponse])
+async def get_today_patients(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Return patients with appointments today for the current clinic.
+
+    - Doctors see only their own appointments.
+    - Secretaries/Admins see all doctors' appointments.
+    """
+    from datetime import timezone as tz
+
+    now = datetime.datetime.now(tz.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end = today_start + datetime.timedelta(days=1)
+
+    query = select(Appointment, Patient, User).join(
+        Patient, Appointment.patient_id == Patient.id
+    ).join(
+        User, Appointment.doctor_id == User.id
+    ).filter(
+        and_(
+            Appointment.clinic_id == current_user.clinic_id,
+            Appointment.scheduled_datetime >= today_start,
+            Appointment.scheduled_datetime < today_end,
+        )
+    )
+
+    # If doctor, restrict to their own appointments
+    if current_user.role == UserRole.DOCTOR:
+        query = query.filter(Appointment.doctor_id == current_user.id)
+
+    result = await db.execute(query.order_by(Appointment.scheduled_datetime))
+    rows = result.all()
+
+    # Deduplicate by (appointment_id) – we want one entry per appointment
+    out: list[TodayPatientResponse] = []
+    for appt, patient, doctor in rows:
+        patient_name = f"{patient.first_name or ''} {patient.last_name or ''}".strip() or patient.email or "Paciente"
+        doctor_name = f"{doctor.first_name or ''} {doctor.last_name or ''}".strip() or doctor.username or "Médico"
+        out.append(
+            TodayPatientResponse(
+                appointment_id=appt.id,
+                patient_id=patient.id,
+                patient_name=patient_name,
+                doctor_id=doctor.id,
+                doctor_name=doctor_name,
+                scheduled_datetime=appt.scheduled_datetime,
+            )
+        )
+
+    return out
 
 
 @router.post("/{appointment_id}/reschedule", response_model=AppointmentResponse)
@@ -682,7 +753,12 @@ async def create_appointment(
         )
     
     # Create appointment
-    db_appointment = Appointment(**appointment_in.model_dump())
+    appointment_data = appointment_in.model_dump()
+    # If no explicit appointment_type was provided, default to doctor's consultation_room (if any)
+    if not appointment_data.get("appointment_type") and getattr(doctor, "consultation_room", None):
+        appointment_data["appointment_type"] = doctor.consultation_room
+
+    db_appointment = Appointment(**appointment_data)
     db.add(db_appointment)
     await db.commit()
     await db.refresh(db_appointment)

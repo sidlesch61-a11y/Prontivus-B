@@ -6,7 +6,7 @@ import enum
 from typing import List, Optional
 
 from sqlalchemy import (
-    Column, DateTime, Enum, ForeignKey, Integer, String, Text, Boolean, JSON
+    Column, DateTime, Enum, ForeignKey, Integer, String, Text, Boolean, JSON, Numeric
 )
 from sqlalchemy.orm import relationship, Mapped
 from database import Base
@@ -97,6 +97,8 @@ class ExamRequest(Base):
     requested_date = Column(DateTime(timezone=True), default=datetime.datetime.now, nullable=False)
     completed = Column(Boolean, default=False, nullable=False)
     completed_date = Column(DateTime(timezone=True), nullable=True)
+    # Link to catalog exam type (optional, for structured reporting)
+    exam_catalog_id = Column(Integer, ForeignKey("exam_catalog.id"), nullable=True, index=True)
     
     # Timestamps
     created_at = Column(DateTime(timezone=True), default=datetime.datetime.now, nullable=False)
@@ -104,6 +106,28 @@ class ExamRequest(Base):
     
     # Relationships
     clinical_record: Mapped["ClinicalRecord"] = relationship("ClinicalRecord", back_populates="exam_requests")
+
+
+class ExamCatalog(Base):
+    """
+    Master catalog of exam types for a clinic (e.g. Hemograma, Raio-X).
+    """
+    __tablename__ = "exam_catalog"
+
+    id = Column(Integer, primary_key=True, index=True)
+    clinic_id = Column(Integer, ForeignKey("clinics.id"), nullable=False, index=True)
+
+    code = Column(String(50), nullable=True, index=True)
+    name = Column(String(200), nullable=False, index=True)
+    category = Column(String(100), nullable=True)  # e.g. Laboratório, Imagem
+    description = Column(Text, nullable=True)
+    preparation = Column(Text, nullable=True)
+
+    price = Column(Numeric(10, 2), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+
+    created_at = Column(DateTime(timezone=True), default=datetime.datetime.now, nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=datetime.datetime.now)
 
 
 class DiagnosisType(enum.Enum):
