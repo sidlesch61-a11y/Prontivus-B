@@ -50,7 +50,7 @@ require_staff = RoleChecker([UserRole.ADMIN, UserRole.SECRETARY, UserRole.DOCTOR
 
 # ==================== Exam Catalog (Admin/Secretary) ====================
 
-@router.post("/exam-catalog", response_model=ExamCatalogResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/clinical/exam-catalog", response_model=ExamCatalogResponse, status_code=status.HTTP_201_CREATED)
 async def create_exam_catalog_item(
     exam_in: ExamCatalogCreate,
     current_user: User = Depends(require_staff),
@@ -69,7 +69,7 @@ async def create_exam_catalog_item(
     return ExamCatalogResponse.model_validate(db_exam)
 
 
-@router.get("/exam-catalog", response_model=List[ExamCatalogResponse])
+@router.get("/clinical/exam-catalog", response_model=List[ExamCatalogResponse])
 async def list_exam_catalog_items(
     search: Optional[str] = Query(None, description="Search by code or name"),
     is_active: Optional[bool] = Query(None, description="Filter by active status"),
@@ -92,7 +92,7 @@ async def list_exam_catalog_items(
     return [ExamCatalogResponse.model_validate(e) for e in exams]
 
 
-@router.put("/exam-catalog/{exam_id}", response_model=ExamCatalogResponse)
+@router.put("/clinical/exam-catalog/{exam_id}", response_model=ExamCatalogResponse)
 async def update_exam_catalog_item(
     exam_id: int,
     exam_in: ExamCatalogUpdate,
@@ -120,7 +120,7 @@ async def update_exam_catalog_item(
     return ExamCatalogResponse.model_validate(db_exam)
 
 
-@router.delete("/exam-catalog/{exam_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/clinical/exam-catalog/{exam_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_exam_catalog_item(
     exam_id: int,
     current_user: User = Depends(require_staff),
@@ -145,7 +145,7 @@ async def delete_exam_catalog_item(
 
 # ==================== Exam Requests Management (staff) ====================
 
-@router.get("/exam-requests", response_model=List[ExamRequestResponse])
+@router.get("/clinical/exam-requests", response_model=List[ExamRequestResponse])
 async def list_exam_requests_for_clinic(
     status_filter: Optional[str] = Query(
         None,
@@ -155,11 +155,13 @@ async def list_exam_requests_for_clinic(
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
     patient_id: Optional[int] = Query(None),
+    appointment_id: Optional[int] = Query(None),
     current_user: User = Depends(require_staff),
     db: AsyncSession = Depends(get_async_session),
 ):
     """
     List exam requests for the current clinic so Secretaria/Admin can register results.
+    Can also be used by doctors to get exam requests for a specific appointment.
     """
     query = select(ExamRequest).join(ClinicalRecord).join(Appointment).filter(
         Appointment.clinic_id == current_user.clinic_id
@@ -178,6 +180,9 @@ async def list_exam_requests_for_clinic(
     if patient_id:
         query = query.filter(Appointment.patient_id == patient_id)
 
+    if appointment_id:
+        query = query.filter(ClinicalRecord.appointment_id == appointment_id)
+
     query = query.order_by(ExamRequest.requested_date.desc())
 
     result = await db.execute(query)
@@ -185,7 +190,7 @@ async def list_exam_requests_for_clinic(
     return [ExamRequestResponse.model_validate(e) for e in exams]
 
 
-@router.put("/exam-requests/{exam_id}/result", response_model=ExamRequestResponse)
+@router.put("/clinical/exam-requests/{exam_id}/result", response_model=ExamRequestResponse)
 async def update_exam_result(
     exam_id: int,
     payload: ExamResultUpdate,
@@ -218,7 +223,30 @@ async def update_exam_result(
     return ExamRequestResponse.model_validate(exam)
 
 
-@router.post("/exam-requests/from-appointment", response_model=ExamRequestResponse, status_code=status.HTTP_201_CREATED)
+@router.delete("/clinical/exam-requests/{exam_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_exam_request(
+    exam_id: int,
+    current_user: User = Depends(require_staff),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Delete an exam request (only if it hasn't been completed yet, or allow deletion by staff).
+    """
+    exam_query = select(ExamRequest).join(ClinicalRecord).join(Appointment).filter(
+        ExamRequest.id == exam_id,
+        Appointment.clinic_id == current_user.clinic_id,
+    )
+    exam_result = await db.execute(exam_query)
+    exam = exam_result.scalar_one_or_none()
+    if not exam:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam request not found")
+
+    await db.delete(exam)
+    await db.commit()
+    return None
+
+
+@router.post("/clinical/exam-requests/from-appointment", response_model=ExamRequestResponse, status_code=status.HTTP_201_CREATED)
 async def create_exam_request_from_appointment(
     payload: ExamRequestFromAppointmentCreate,
     current_user: User = Depends(require_staff),
