@@ -324,17 +324,33 @@ async def create_stock_movement(
     db.add(db_movement)
     
     # Update product stock
-    if movement_in.type == StockMovementType.IN:
+    # Get the string value of the movement type (handles both enum and string)
+    try:
+        movement_type_str = movement_in.type.value if hasattr(movement_in.type, 'value') else str(movement_in.type)
+    except:
+        movement_type_str = str(movement_in.type)
+    movement_type_str = movement_type_str.lower()
+    
+    if movement_type_str == "in":
         product.current_stock += movement_in.quantity
-    elif movement_in.type == StockMovementType.OUT:
+    elif movement_type_str == "out":
         if product.current_stock < movement_in.quantity:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Insufficient stock"
             )
         product.current_stock -= movement_in.quantity
-    elif movement_in.type == StockMovementType.ADJUSTMENT:
+    elif movement_type_str == "adjustment":
         product.current_stock = movement_in.quantity
+    else:
+        # Log for debugging
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Invalid stock movement type received: {movement_type_str} (original: {movement_in.type}, type: {type(movement_in.type)})")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid movement type: {movement_type_str}. Must be 'in', 'out', or 'adjustment'"
+        )
     
     await db.commit()
     await db.refresh(db_movement)
